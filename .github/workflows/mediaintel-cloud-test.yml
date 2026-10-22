@@ -1,0 +1,31 @@
+
+name: MediaIntel Cloud Runner Test
+
+on:
+  push:
+    branches:
+      - feature/cloud-processing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-cloud-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify cloud runner
+        run: |
+          echo "MediaIntel GitHub Actions runner started"
+          python --version
+          echo "Cloud environment ready"
