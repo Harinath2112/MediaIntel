@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test-cloud-runner:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -24,8 +24,43 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Verify cloud runner
+      - name: Install PostgreSQL driver
         run: |
-          echo "MediaIntel GitHub Actions runner started"
-          python --version
-          echo "Cloud environment ready"
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]"
+
+      - name: Test Supabase connection
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import psycopg
+
+          url = os.environ.get("MEDIAINTEL_DB_URL")
+          if not url:
+              sys.exit("ERROR: MEDIAINTEL_DB_URL secret is missing.")
+
+          # Psycopg expects a standard PostgreSQL connection URL.
+          if url.startswith("postgresql+psycopg://"):
+              url = "postgresql://" + url.split("://", 1)[1]
+
+          try:
+              with psycopg.connect(url, connect_timeout=15) as conn:
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT COUNT(*) FROM channels")
+                      channel_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT COUNT(*) FROM videos")
+                      video_count = cur.fetchone()[0]
+
+              print("Supabase PostgreSQL connection successful!")
+              print(f"Channels: {channel_count}")
+              print(f"Videos: {video_count}")
+              print("Read-only database verification passed.")
+
+          except Exception as exc:
+              print(f"Database connection failed: {type(exc).__name__}")
+              sys.exit(1)
+          PY
