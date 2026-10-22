@@ -16,3 +16,5 @@ PyMySQL>=1.1,<2
 # Dashboard reporting dependencies
 reportlab>=4.2,<5
 matplotlib>=3.9,<4
+
+psycopg[binary]>=3.2,<4

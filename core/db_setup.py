@@ -146,15 +146,40 @@ COLUMN_MIGRATIONS = [
 ]
 
 
+
 def ensure_database() -> None:
-    """MySQL only: CREATE DATABASE when it does not exist yet."""
-    if config.database_url().startswith("sqlite") or config.env("MEDIAINTEL_DB_URL"):
+    """Create a database only for legacy MySQL configurations.
+
+    SQLite creates its database file automatically.
+    PostgreSQL databases must already exist.
+    """
+    from sqlalchemy.engine import make_url
+
+    url = config.database_url()
+    dialect = make_url(url).get_backend_name()
+
+    if dialect in ("sqlite", "postgresql"):
         return
+
+    if dialect != "mysql":
+        raise ValueError(f"Unsupported database dialect: {dialect}")
+
     from sqlalchemy import create_engine
-    eng = create_engine(config.database_url(with_database=False))
-    with eng.begin() as conn:
-        conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{config.env('DB_NAME', 'mediaintel_project')}` CHARACTER SET utf8mb4"))
-    eng.dispose()
+
+    engine = create_engine(config.database_url(with_database=False))
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"CREATE DATABASE IF NOT EXISTS "
+                    f"`{config.env('DB_NAME', 'mediaintel_project')}` "
+                    f"CHARACTER SET utf8mb4"
+                )
+            )
+    finally:
+        engine.dispose()
+
 
 
 def _quarantine_incompatible_sqlite() -> str | None:

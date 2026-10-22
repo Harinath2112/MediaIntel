@@ -160,9 +160,22 @@ def database_url(with_database: bool = True) -> str:
 
 
 def db_label() -> str:
-    url = database_url()
-    return "SQLite  data/mediaintel.db" if url.startswith("sqlite") else f"MySQL  {env('DB_NAME', 'mediaintel_project')}"
+    """Return a readable label for the configured database."""
+    from sqlalchemy.engine import make_url
 
+    url = make_url(database_url())
+    dialect = url.get_backend_name()
+
+    if dialect == "sqlite":
+        return f"SQLite  {url.database or ':memory:'}"
+
+    if dialect == "postgresql":
+        return f"PostgreSQL  {url.database or 'unknown'}"
+
+    if dialect == "mysql":
+        return f"MySQL  {url.database or env('DB_NAME', 'mediaintel_project')}"
+
+    return f"{dialect}  {url.database or 'unknown'}"
 
 _engine = None
 
@@ -214,16 +227,46 @@ def execute(query, params: dict | list | None = None) -> int:
         return result.rowcount
 
 
+
 def upsert_sql(table: str, columns: list[str], keys: list[str], update: list[str] | None = None):
-    """INSERT ... ON CONFLICT / ON DUPLICATE KEY UPDATE, written for whichever database is in use."""
+    """Generate database-specific UPSERT SQL for SQLite, PostgreSQL, and MySQL."""
     from sqlalchemy import text
+
     update = [c for c in columns if c not in keys] if update is None else update
-    cols, vals = ", ".join(columns), ", ".join(f":{c}" for c in columns)
-    if is_sqlite():
-        tail = (f"ON CONFLICT({', '.join(keys)}) DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in update)
-                if update else f"ON CONFLICT({', '.join(keys)}) DO NOTHING")
-        return text(f"INSERT INTO {table} ({cols}) VALUES ({vals}) {tail}")
-    if update:
-        return text(f"INSERT INTO {table} ({cols}) VALUES ({vals}) ON DUPLICATE KEY UPDATE "
-                    + ", ".join(f"{c} = VALUES({c})" for c in update))
-    return text(f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals})")
+    cols = ", ".join(columns)
+    vals = ", ".join(f":{c}" for c in columns)
+    dialect = get_engine().dialect.name
+
+    if dialect in ("sqlite", "postgresql"):
+        conflict_keys = ", ".join(keys)
+
+        if update:
+            assignments = ", ".join(
+                f"{c} = excluded.{c}" for c in update
+            )
+            tail = (
+                f"ON CONFLICT ({conflict_keys}) "
+                f"DO UPDATE SET {assignments}"
+            )
+        else:
+            tail = f"ON CONFLICT ({conflict_keys}) DO NOTHING"
+
+        return text(
+            f"INSERT INTO {table} ({cols}) VALUES ({vals}) {tail}"
+        )
+
+    if dialect == "mysql":
+        if update:
+            assignments = ", ".join(
+                f"{c} = VALUES({c})" for c in update
+            )
+            return text(
+                f"INSERT INTO {table} ({cols}) VALUES ({vals}) "
+                f"ON DUPLICATE KEY UPDATE {assignments}"
+            )
+
+        return text(
+            f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals})"
+        )
+
+    raise ValueError(f"Unsupported database dialect: {dialect}")
