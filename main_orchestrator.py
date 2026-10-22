@@ -165,11 +165,23 @@ def preflight(console, quick: bool) -> bool:
     else:
         good(f"Python {sys.version.split()[0]}   ·   speed profile: {config.PROFILE}")
 
+
     if (ROOT / ".env").exists():
-        good(".env loaded")
-    elif not offline_test:
-        bad("No .env file found. Copy .env.example to .env and fill in your keys.")
+        good(".env configuration available")
+    elif (
+        config.env("MEDIAINTEL_DB_URL")
+        or config.env("DATABASE_URL")
+        or config.env("YOUTUBE_API_KEY")
+        or config.env_bool("MEDIAINTEL_TEST_FAKES")
+    ):
+        good("Environment-based configuration available")
+    else:
+        bad(
+            "No configuration found. Create a .env file locally "
+            "or configure environment variables for cloud execution."
+        )
         return False
+
 
     if not quick and not offline_test and not config.env("YOUTUBE_API_KEY"):
         bad("YOUTUBE_API_KEY is missing in .env  (the pipeline never invents data - a real key is required)")

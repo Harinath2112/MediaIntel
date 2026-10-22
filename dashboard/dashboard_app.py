@@ -39,13 +39,13 @@ _ensure_schema_once()
 @st.cache_data(ttl=30)
 def load_data():
     """Tracked channels only; every table filtered to them."""
-    channels_df = config.read_sql("SELECT * FROM channels WHERE is_tracked = 1")
-    videos_df = config.read_sql("SELECT v.* FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1")
+    channels_df = config.read_sql("SELECT * FROM channels WHERE is_tracked = TRUE")
+    videos_df = config.read_sql("SELECT v.* FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE")
     comments_df = config.read_sql("""SELECT m.comment_id, m.video_id FROM comments m JOIN videos v ON v.video_id = m.video_id
-                                     JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1""")
+                                     JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE""")
     insights_df = config.read_sql("""SELECT s.* FROM sentiment_insights s JOIN comments m ON m.comment_id = s.comment_id
                                      JOIN videos v ON v.video_id = m.video_id JOIN channels c ON c.channel_id = v.channel_id
-                                     WHERE c.is_tracked = 1""")
+                                     WHERE c.is_tracked = TRUE""")
     return channels_df, videos_df, comments_df, insights_df
 
 
@@ -61,12 +61,12 @@ def load_extra():
         "aspects": safe("SELECT comment_id, aspect, sentiment_label, polarity, confidence FROM aspect_sentiments"),
         "relevance": safe("""SELECT r.*, v.title, v.channel_id, c.channel_name FROM video_relevance r
                              JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id
-                             WHERE c.is_tracked = 1"""),
+                             WHERE c.is_tracked = TRUE"""),
         "topics": safe("SELECT * FROM topic_suggestions ORDER BY scope, rank_no"),
         "transcripts": safe("SELECT video_id, source, language, model_name, word_count, audio_seconds, transcript_text FROM transcripts"),
         "alerts": safe("""SELECT a.id, a.detected_at, a.metric, a.velocity, a.baseline, a.ratio, a.severity, a.emailed, v.title, c.channel_name
                           FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
-                          JOIN channels c ON c.channel_id = a.channel_id WHERE c.is_tracked = 1
+                          JOIN channels c ON c.channel_id = a.channel_id WHERE c.is_tracked = TRUE
                           ORDER BY a.detected_at DESC"""),
     }
 
