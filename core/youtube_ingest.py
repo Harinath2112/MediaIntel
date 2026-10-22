@@ -142,7 +142,7 @@ COMMENT_COLS = ["comment_id", "video_id", "author_name", "comment_text", "like_c
 
 def _comment_rows(comments):
     return [{"comment_id": c["comment_id"], "video_id": c["video_id"], "author_name": c["author"][:250],
-             "comment_text": c["text"], "like_count": c["likes"], "published_at": c["published_at"], "is_processed": 0}
+             "comment_text": c["text"], "like_count": c["likes"], "published_at": c["published_at"], "is_processed": False}
             for c in comments]
 
 
