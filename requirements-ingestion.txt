@@ -1,0 +1,17 @@
+
+# MediaIntel - GitHub Actions ingestion dependencies
+# Python 3.12
+
+SQLAlchemy>=2.0.30,<3
+psycopg[binary]>=3.2,<4
+python-dotenv>=1.0,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# YouTube collection
+google-api-python-client>=2.130
+youtube-transcript-api>=1.0
+yt-dlp>=2025.1.1
+
+# Console logging
+rich>=13.7

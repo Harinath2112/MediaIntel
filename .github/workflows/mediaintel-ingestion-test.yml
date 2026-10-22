@@ -1,0 +1,48 @@
+
+name: MediaIntel Ingestion Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-one-channel:
+    if: github.ref == 'refs/heads/feature/cloud-processing'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ingestion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ingestion.txt
+
+      - name: Verify required secrets
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || exit 1
+          test -n "$YOUTUBE_API_KEY" || exit 1
+          echo "Required secrets are configured."
+
+      - name: Ingest Apna College test data
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          MEDIAINTEL_INGEST_CHANNEL_ID: UCBwmMxybNva6P_5VmxjzwqA
+          MEDIAINTEL_INGEST_VIDEO_LIMIT: '2'
+          COMMENT_PAGES: '1'
+          INGEST_WORKERS: '1'
+        run: |
+          python -m core.youtube_ingest

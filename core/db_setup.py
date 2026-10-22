@@ -246,7 +246,7 @@ def sync_channels() -> list[dict]:
         if not cid:
             continue
         rows.append({"channel_id": cid, "channel_name": (it.get("name") or it.get("channel_name") or cid)[:100],
-                     "is_tracked": 1 if it.get("is_tracked", True) else 0})
+                     "is_tracked": bool(it.get("is_tracked", True))})
     if rows:
         from sqlalchemy import bindparam
         with config.get_engine().begin() as conn:
@@ -254,8 +254,15 @@ def sync_channels() -> list[dict]:
                                            ["channel_name", "is_tracked"]), rows)
             # the JSON file is the source of truth for WHAT IS TRACKED: channels missing from it are untracked
             # (hidden from every stage and report) - their stored data is kept, never deleted
-            gone = conn.execute(text("UPDATE channels SET is_tracked = 0 WHERE is_tracked = 1 AND channel_id NOT IN :ids")
-                                .bindparams(bindparam("ids", expanding=True)), {"ids": [r["channel_id"] for r in rows]})
+            
+            gone = conn.execute(
+                text(
+                    "UPDATE channels SET is_tracked = FALSE "
+                    "WHERE is_tracked = TRUE AND channel_id NOT IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": [r["channel_id"] for r in rows]}
+            )
+
             sync_channels.untracked = gone.rowcount or 0
     return rows
 
