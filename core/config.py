@@ -140,6 +140,13 @@ def mail_settings() -> dict:
 def database_url(with_database: bool = True) -> str:
     """DATABASE_URL > DB_TYPE > legacy MySQL variables > SQLite default."""
     explicit = env("MEDIAINTEL_DB_URL") or env("DATABASE_URL")
+
+    if not explicit:
+        try:
+            import streamlit as st
+            explicit = st.secrets.get("MEDIAINTEL_DB_URL")
+        except (ImportError, FileNotFoundError, KeyError):
+            pass
     if explicit and with_database:
         if explicit.startswith("sqlite:///") and not explicit.startswith("sqlite:////") and ":" not in explicit[10:]:
             return "sqlite:///" + str((WORK / explicit[10:]).resolve())      # relative path -> inside the project
