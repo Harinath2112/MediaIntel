@@ -3,17 +3,14 @@ from pathlib import Path
 import sqlite3
 import shutil
 
-SOURCE = Path("demo_data/mediaintel_demo.db")
+SOURCE = Path("data/mediaintel.db")
 TARGET = Path("demo_data/mediaintel_public.db")
 
 if not SOURCE.exists():
     raise SystemExit("Source demo database not found.")
 
 if TARGET.exists():
-    raise SystemExit(
-        "Public database already exists. "
-        "Rename or move it before running again."
-    )
+    TARGET.unlink()
 
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 
