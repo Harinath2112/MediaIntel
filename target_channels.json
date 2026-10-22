@@ -1,0 +1,27 @@
+[
+  {
+    "channel_id": "UC8butISFwT-Wl7EV0hUK0BQ",
+    "name": "FreeCodeCamp",
+    "is_tracked": true
+  },
+  {
+    "channel_id": "UCWv7vMbMWH4-V0ZXdmDpPBA",
+    "name": "Programming with Mosh",
+    "is_tracked": true
+  },
+  {
+    "channel_id": "UC59K-uG2A5ogwIrHw4bmlEg",
+    "name": "Telusko",
+    "is_tracked": true
+  },
+  {
+    "channel_id": "UCh9nVJoWXmFb7sLApWGcLPQ",
+    "name": "Codebasics",
+    "is_tracked": true
+  },
+  {
+    "channel_id": "UCX6b17PVsYBQ0ip5gyeme-Q",
+    "name": "CrashCourse",
+    "is_tracked": true
+  }
+]

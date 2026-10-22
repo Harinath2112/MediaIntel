@@ -1,0 +1,78 @@
+
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Original databases and backups
+data/*.db
+data/*.db-*
+data/backup/
+
+# Runtime files
+data/logs/
+data/rpa_logs/
+outputs/
+*.log
+
+# Local environment
+.streamlit/secrets.toml
+
+# Keep the sanitized demo database
+!demo_data/
+!demo_data/mediaintel_demo.db
+
+
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python environments
+.venv/
+.venv-cloud/
+venv/
+__pycache__/
+*.pyc
+
+# Original databases
+data/*.db
+data/*.db-*
+data/backup/
+*.sqlite
+*.sqlite3
+
+# Logs and runtime data
+data/logs/
+data/rpa_logs/
+*.log
+
+# Generated reports and private output
+outputs/
+outbox/
+
+# Editor and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# Only the sanitized public database may be committed
+/demo_data/*.db
+!/demo_data/mediaintel_public.db
+# SQLite temporary files
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Keep the unsanitized demo database private
+/demo_data/*.db
+
+# Allow only the sanitized public database
+!/demo_data/mediaintel_public.db

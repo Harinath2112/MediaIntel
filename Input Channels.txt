@@ -1,0 +1,17 @@
+[
+  { "channel_id": "UCJskGeByzRRSvmOyZOz61ig", "name": "take U forward",        "is_tracked": true },
+  { "channel_id": "UCBwmMxybNva6P_5VmxjzwqA", "name": "Apna College",          "is_tracked": true },
+  { "channel_id": "UC5u7mJb1fIAedPG-9Pg6Nbw", "name": "Dodagatta Nihar",       "is_tracked": true },
+  { "channel_id": "UCmFUoPicoxuJAuR2NfNdQGA", "name": "Swaroop Talks",         "is_tracked": true },
+  { "channel_id": "UCJihyK0A38SZ6SdJirEdIOw", "name": "Gate Smashers",         "is_tracked": true },
+  { "channel_id": "UCiGyWN6DEbnj2alu7iapuKQ", "name": "Physics Wallah",        "is_tracked": true },
+  { "channel_id": "UCUaPVV_tQDVKK5fbvh0aNuA", "name": "Harsha Verse",          "is_tracked": true },
+  { "channel_id": "UC3Qe9c8dZqnjwcDD2vCZBKQ", "name": "PythonLife",            "is_tracked": true },
+  { "channel_id": "UCM-yUTYGmrNvKOCcAl21g3w", "name": "Jennys Lectures CS IT", "is_tracked": true },
+  { "channel_id": "UCeVMnSShP_Iviwkknt83cww", "name": "CodeWithHarry",         "is_tracked": true },
+  { "channel_id": "UC8butISFwT-Wl7EV0hUK0BQ", "name": "FreeCodeCamp",          "is_tracked": true },
+  { "channel_id": "UCWv7vMbMWH4-V0ZXdmDpPBA", "name": "Programming with Mosh", "is_tracked": true },
+  { "channel_id": "UC59K-uG2A5ogwIrHw4bmlEg", "name": "Telusko",               "is_tracked": true },
+  { "channel_id": "UCh9nVJoWXmFb7sLApWGcLPQ", "name": "Codebasics",            "is_tracked": true },
+  { "channel_id": "UCX6b17PVsYBQ0ip5gyeme-Q", "name": "CrashCourse",           "is_tracked": true }
+]

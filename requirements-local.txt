@@ -1,0 +1,34 @@
+# MediaIntel - direct dependencies only (pip resolves the rest).
+# Tested with Python 3.12. Windows/Linux/macOS wheels exist for every package below on Python 3.12 and 3.13.
+
+# --- data layer
+SQLAlchemy>=2.0.30
+PyMySQL>=1.1.0
+cryptography>=42.0          # MySQL 8 "caching_sha2_password" login
+python-dotenv>=1.0
+pandas>=2.2
+numpy>=1.26
+
+# --- YouTube collection
+google-api-python-client>=2.130
+yt-dlp>=2025.1.1            # audio download for Whisper (run.bat also keeps this up to date)
+youtube-transcript-api>=1.0 # caption safety net when Whisper runs out of its time budget
+imageio-ffmpeg>=0.5         # bundled ffmpeg, nothing to install by hand
+
+# --- AI: Whisper speech-to-text, RoBERTa sentiment, multilingual embeddings
+faster-whisper>=1.0         # OpenAI Whisper weights on CTranslate2 (about 4x faster on CPU)
+torch>=2.3
+transformers>=4.44
+sentencepiece>=0.2         # tokenizer of the XLM-RoBERTa sentiment model
+protobuf>=4.25
+sentence-transformers>=3.0
+
+# --- dashboard, reports, console
+streamlit>=1.50,<2
+plotly>=5.24
+matplotlib>=3.9
+reportlab>=4.2
+rich>=13.7
+
+# --- RPA (open source, no licence, no robot installer)
+robotframework>=7.0
