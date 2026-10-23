@@ -1,0 +1,16 @@
+﻿# MediaIntel - GitHub Actions RoBERTa sentiment processing
+# Python 3.12, CPU-only execution
+
+# Database
+SQLAlchemy>=2.0.30,<3
+psycopg[binary]>=3.2,<4
+python-dotenv>=1.0,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# AI sentiment and aspect detection
+torch>=2.3
+transformers>=4.44
+sentence-transformers>=3.0
+sentencepiece>=0.2
+protobuf>=4.25

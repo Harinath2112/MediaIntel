@@ -9,6 +9,11 @@ on:
         required: true
         type: boolean
         default: false
+      run_sentiment:
+        description: 'Run the controlled RoBERTa sentiment test (5 comments)?'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -107,3 +112,42 @@ jobs:
           INGEST_WORKERS: '1'
         run: |
           python -m core.youtube_ingest
+
+  test-roberta-sentiment:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/cloud-processing' && inputs.run_sentiment == true
+    needs: test-cloud-runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install AI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ai.txt
+
+      - name: Verify Supabase secret
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || exit 1
+          echo "Supabase secret configured."
+
+      - name: Run controlled RoBERTa sentiment analysis
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SENTIMENT_BATCH: '4'
+          NLP_CHUNK: '5'
+          QUANTIZE: '0'
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          python -m core.nlp_pipeline --limit 5
