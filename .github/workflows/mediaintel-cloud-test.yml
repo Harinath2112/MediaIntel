@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       run_whisper:
-        description: 'Run the controlled Whisper transcription test (1 video)?'
+        description: 'Run the isolated Whisper transcription test (Supabase Storage audio)?'
         required: true
         type: boolean
         default: false
@@ -55,7 +55,6 @@ jobs:
           if not url:
               sys.exit("ERROR: MEDIAINTEL_DB_URL secret is missing.")
 
-          # Psycopg expects a standard PostgreSQL connection URL.
           if url.startswith("postgresql+psycopg://"):
               url = "postgresql://" + url.split("://", 1)[1]
 
@@ -177,64 +176,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-whisper.txt
 
-      - name: Verify Supabase secret
+      - name: Verify Supabase Storage configuration
         env:
-          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
-          test -n "$MEDIAINTEL_DB_URL" || exit 1
-          echo "Supabase secret configured."
+          test -n "$SUPABASE_URL" || { echo "Missing SUPABASE_URL"; exit 1; }
+          test -n "$SUPABASE_SECRET_KEY" || { echo "Missing SUPABASE_SECRET_KEY"; exit 1; }
+          echo "Supabase Storage configuration verified."
 
-      - name: Run controlled Whisper transcription
+      - name: Run isolated Whisper transcription test
         env:
-          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
-          SPEED_PROFILE: fast
-          WHISPER_MODEL: tiny
-          WHISPER_COMPUTE: int8
-          WHISPER_MAX_AUDIO_MIN: '1'
-          WHISPER_BUDGET_MIN: '5'
-          WHISPER_VIDEOS_PER_CHANNEL: '1'
-          DOWNLOAD_WORKERS: '1'
-          WHISPER_ALLOW_TEMP_DOWNLOAD: 'false'
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           OMP_NUM_THREADS: '2'
         run: |
-          python - <<'PY'
-          import sys
-          from core.transcribe_videos import run
-
-          result = run(
-              limit=1,
-              use_captions=False,
-              budget_min=5,
-              video_id="go_pJIbx0qs",
-          )
-
-          if result["whisper"] != 1:
-              sys.exit("Whisper test failed: expected exactly one successful transcription.")
-
-          print("Controlled Whisper transcription succeeded.")
-          PY
-
-      - name: Verify saved Whisper transcript
-        env:
-          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
-        run: |
-          python - <<'PY'
-          import sys
-          from core import config
-
-          df = config.read_sql(
-              "SELECT source, transcript_text FROM transcripts WHERE video_id = :video_id",
-              {"video_id": "go_pJIbx0qs"},
-          )
-
-          if df.empty:
-              sys.exit("ERROR: No transcript saved.")
-
-          row = df.iloc[0]
-
-          if row["source"] != "whisper" or not str(row["transcript_text"] or "").strip():
-              sys.exit("ERROR: Valid Whisper transcript not found.")
-
-          print("Whisper transcript verified in Supabase.")
-          print(f"Transcript characters: {len(str(row['transcript_text']))}")
-          PY
+          python scripts/test_cloud_whisper.py
