@@ -202,7 +202,7 @@ def candidate_videos(limit: int | None = None):
         FROM videos v
         JOIN channels c ON c.channel_id = v.channel_id
         LEFT JOIN transcripts t ON t.video_id = v.video_id
-        WHERE c.is_tracked = 1
+        WHERE c.is_tracked = TRUE
           AND (t.video_id IS NULL OR (t.source IN ('captions', 'failed') AND t.attempts < :maxa))""",
                          {"maxa": MAX_ATTEMPTS})
     if df.empty:
@@ -222,9 +222,12 @@ if config.env_bool("MEDIAINTEL_TEST_FAKES"):   # offline self-test hook
 # ---------------------------------------------------------------------------
 # main routine
 # ---------------------------------------------------------------------------
-def run(limit: int | None = None, use_captions: bool = True, budget_min: float | None = None) -> dict:
+def run(limit: int | None = None, use_captions: bool = True, budget_min: float | None = None,
+        video_id: str | None = None) -> dict:
     budget = (BUDGET_MIN if budget_min is None else budget_min) * 60
     everything = candidate_videos()
+    if video_id is not None:
+        everything = everything[everything["video_id"] == video_id].copy()
     stats = {"whisper": 0, "captions": 0, "failed": 0, "queued": 0, "total_todo": len(everything)}
     if everything.empty:
         print("All videos already transcribed - nothing to do.")
@@ -322,5 +325,6 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=None, help="Whisper videos per channel this run")
     ap.add_argument("--no-captions", action="store_true", help="Whisper only, no caption fallback")
     ap.add_argument("--budget", type=float, default=None, help="time budget in minutes")
+    ap.add_argument("--video-id", type=str, default=None, help="Process only this video ID")
     a = ap.parse_args()
-    run(a.limit, use_captions=not a.no_captions, budget_min=a.budget)
+    run(a.limit, use_captions=not a.no_captions, budget_min=a.budget, video_id=a.video_id)

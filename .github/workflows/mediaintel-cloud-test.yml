@@ -14,6 +14,11 @@ on:
         required: true
         type: boolean
         default: false
+      run_whisper:
+        description: 'Run the controlled Whisper transcription test (1 video)?'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -151,3 +156,85 @@ jobs:
           TOKENIZERS_PARALLELISM: 'false'
         run: |
           python -m core.nlp_pipeline --limit 5
+
+  test-whisper-transcription:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/cloud-processing' && inputs.run_whisper == true
+    needs: test-cloud-runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Whisper dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-whisper.txt
+
+      - name: Verify Supabase secret
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || exit 1
+          echo "Supabase secret configured."
+
+      - name: Run controlled Whisper transcription
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SPEED_PROFILE: fast
+          WHISPER_MODEL: tiny
+          WHISPER_COMPUTE: int8
+          WHISPER_MAX_AUDIO_MIN: '1'
+          WHISPER_BUDGET_MIN: '5'
+          WHISPER_VIDEOS_PER_CHANNEL: '1'
+          DOWNLOAD_WORKERS: '1'
+          WHISPER_ALLOW_TEMP_DOWNLOAD: 'false'
+          OMP_NUM_THREADS: '2'
+        run: |
+          python - <<'PY'
+          import sys
+          from core.transcribe_videos import run
+
+          result = run(
+              limit=1,
+              use_captions=False,
+              budget_min=5,
+              video_id="go_pJIbx0qs",
+          )
+
+          if result["whisper"] != 1:
+              sys.exit("Whisper test failed: expected exactly one successful transcription.")
+
+          print("Controlled Whisper transcription succeeded.")
+          PY
+
+      - name: Verify saved Whisper transcript
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python - <<'PY'
+          import sys
+          from core import config
+
+          df = config.read_sql(
+              "SELECT source, transcript_text FROM transcripts WHERE video_id = :video_id",
+              {"video_id": "go_pJIbx0qs"},
+          )
+
+          if df.empty:
+              sys.exit("ERROR: No transcript saved.")
+
+          row = df.iloc[0]
+
+          if row["source"] != "whisper" or not str(row["transcript_text"] or "").strip():
+              sys.exit("ERROR: Valid Whisper transcript not found.")
+
+          print("Whisper transcript verified in Supabase.")
+          print(f"Transcript characters: {len(str(row['transcript_text']))}")
+          PY

@@ -1,0 +1,15 @@
+﻿# MediaIntel - Cloud Whisper transcription
+# Python 3.12, CPU-only
+
+# PostgreSQL
+SQLAlchemy>=2.0.30,<3
+psycopg[binary]>=3.2,<4
+python-dotenv>=1.0,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# Speech-to-text and YouTube audio
+faster-whisper>=1.1,<2
+yt-dlp>=2025.1.1
+imageio-ffmpeg>=0.5,<1
+youtube-transcript-api>=1.0,<2
