@@ -1,0 +1,95 @@
+﻿name: MediaIntel Isolated Whisper Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  whisper-test:
+    name: Test sample audio transcription
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-whisper.txt
+
+      - name: Install Whisper dependencies
+        run: |
+          python -m pip install -r requirements-whisper.txt
+
+      - name: Transcribe isolated sample
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          OMP_NUM_THREADS: '2'
+        run: |
+          python - <<'PY'
+          import os
+          import tempfile
+          import requests
+          import av
+          from faster_whisper import WhisperModel
+
+          url = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SECRET_KEY"]
+
+          headers = {
+              "apikey": key,
+              "Authorization": f"Bearer {key}"
+          }
+
+          print("PyAV version:", av.__version__)
+
+          with tempfile.TemporaryDirectory() as folder:
+              audio = os.path.join(folder, "whisper-test.m4a")
+
+              with requests.get(
+                  f"{url}/storage/v1/object/authenticated/mediaintel-audio/whisper-test.m4a",
+                  headers=headers,
+                  timeout=60,
+                  stream=True
+              ) as response:
+                  response.raise_for_status()
+                  with open(audio, "wb") as output:
+                      for chunk in response.iter_content(chunk_size=65536):
+                          output.write(chunk)
+
+              print("Audio download: PASS")
+
+              model = WhisperModel(
+                  "tiny",
+                  device="cpu",
+                  compute_type="int8"
+              )
+
+              segments, info = model.transcribe(
+                  audio,
+                  beam_size=1,
+                  vad_filter=True
+              )
+
+              segments = list(segments)
+
+              print("Detected language:", info.language)
+              print("Duration:", round(info.duration, 2), "seconds")
+              print("Segments:", len(segments))
+              print("Transcript:")
+
+              for segment in segments:
+                  print(segment.text.strip())
+
+              if not segments:
+                  raise RuntimeError("No speech segments detected")
+
+              print("Cloud transcription: PASS")
+          PY
