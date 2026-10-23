@@ -213,49 +213,6 @@ def update_audio_mapping_status(
         """
         UPDATE video_audio_assets
         SET status = :status,
-            attempts = attempts + 1,
-            last_error = :error,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE video_id = :video_id
-          AND status IN ('pending', 'failed')
-          AND attempts < 3
-        """
-    )
-
-    with config.get_engine().begin() as connection:
-        result = connection.execute(
-            statement,
-            {
-                "video_id": video_id.strip(),
-                "status": status,
-                "error": (str(error)[:255] if error else None),
-            },
-        )
-
-        return result.rowcount
-
-def update_audio_mapping_status(
-    video_id: str,
-    status: str,
-    *,
-    error: str | None = None,
-) -> int:
-    """Update a mapped audio asset after a processing attempt.
-
-    Returns the number of updated rows. Never creates a mapping.
-    """
-    from sqlalchemy import text
-
-    if not video_id or not video_id.strip():
-        raise ValueError("A valid video ID is required")
-
-    if status not in ("completed", "failed"):
-        raise ValueError("Status must be 'completed' or 'failed'")
-
-    statement = text(
-        """
-        UPDATE video_audio_assets
-        SET status = :status,
             last_error = :error,
             updated_at = CURRENT_TIMESTAMP
         WHERE video_id = :video_id
