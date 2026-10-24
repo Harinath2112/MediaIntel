@@ -79,12 +79,20 @@ jobs:
                       )
                       apna_channel = cur.fetchone()
 
+                      cur.execute("SELECT COUNT(*) FROM video_audio_assets")
+                      audio_mapping_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT status, COUNT(*) FROM video_audio_assets GROUP BY status ORDER BY status")
+                      audio_status_counts = cur.fetchall()
+
               print("Supabase PostgreSQL connection successful!")
               print(f"Channels: {channel_count}")
               print(f"Videos: {video_count}")
               print(f"Comments: {comment_count}")
               print(f"Tracked channels: {tracked_count}")
               print(f"Apna College: {apna_channel}")
+              print(f"Audio mappings: {audio_mapping_count}")
+              print(f"Audio mapping statuses: {audio_status_counts}")
               print("Read-only database verification passed.")
 
           except Exception as exc:
