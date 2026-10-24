@@ -67,9 +67,24 @@ jobs:
                       cur.execute("SELECT COUNT(*) FROM videos")
                       video_count = cur.fetchone()[0]
 
+                      cur.execute("SELECT COUNT(*) FROM comments")
+                      comment_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT COUNT(*) FROM channels WHERE is_tracked = TRUE")
+                      tracked_count = cur.fetchone()[0]
+
+                      cur.execute(
+                          "SELECT channel_name, is_tracked FROM channels WHERE channel_id = %s",
+                          ("UCBwmMxybNva6P_5VmxjzwqA",)
+                      )
+                      apna_channel = cur.fetchone()
+
               print("Supabase PostgreSQL connection successful!")
               print(f"Channels: {channel_count}")
               print(f"Videos: {video_count}")
+              print(f"Comments: {comment_count}")
+              print(f"Tracked channels: {tracked_count}")
+              print(f"Apna College: {apna_channel}")
               print("Read-only database verification passed.")
 
           except Exception as exc:
