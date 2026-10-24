@@ -976,11 +976,42 @@ with tab_system:
 
                 if st.button("Register & Track Channel", width="stretch", key="btn_add_chan"):
                     raw_id = new_cid_input.strip()
-                    m = re.search(r"channel/(UC[A-Za-z0-9_-]{22})", raw_id)
-                    cid = m.group(1) if m else raw_id
+                    cid = None
 
-                    if not re.match(r"^UC[A-Za-z0-9_-]{22}$", cid):
-                        st.error("Invalid YouTube Channel ID. Must be a 24-character ID starting with 'UC'.")
+                    # 1. Match 24-character YouTube Channel ID starting with UC anywhere in the input
+                    m = re.search(r"(UC[A-Za-z0-9_-]{22})", raw_id)
+                    if m:
+                        cid = m.group(1)
+                    elif raw_id.startswith("@") or "youtube.com/@" in raw_id:
+                        # 2. Try handle resolution if YouTube API key is available
+                        handle_m = re.search(r"@([A-Za-z0-9_.-]+)", raw_id)
+                        if handle_m:
+                            handle_val = handle_m.group(1)
+                            yt_key = config.env("YOUTUBE_API_KEY")
+                            if not yt_key:
+                                try:
+                                    yt_key = st.secrets.get("YOUTUBE_API_KEY")
+                                except Exception:
+                                    pass
+                            if yt_key:
+                                try:
+                                    import requests
+                                    h_res = requests.get(
+                                        "https://www.googleapis.com/youtube/v3/channels",
+                                        params={"part": "id,snippet", "forHandle": handle_val, "key": yt_key},
+                                        timeout=8,
+                                    )
+                                    if h_res.status_code == 200:
+                                        items = h_res.json().get("items", [])
+                                        if items:
+                                            cid = items[0]["id"]
+                                            if not new_cname_input.strip():
+                                                new_cname_input = items[0]["snippet"].get("title", cid)
+                                except Exception:
+                                    pass
+
+                    if not cid or not re.match(r"^UC[A-Za-z0-9_-]{22}$", cid):
+                        st.error("Invalid YouTube Channel. Please provide a 24-character ID starting with 'UC' or a channel URL containing it.")
                     else:
                         cname = new_cname_input.strip() or cid
                         try:
@@ -1065,21 +1096,29 @@ with tab_system:
                     except Exception:
                         pass
                 if gh_token:
-                    if st.button("🚀 Dispatch Cloud Ingestion Workflow", width="stretch"):
-                        import requests
-                        res = requests.post(
-                            f"https://api.github.com/repos/{gh_repo}/actions/workflows/mediaintel-cloud-pipeline.yml/dispatches",
-                            headers={
-                                "Authorization": f"Bearer {gh_token}",
-                                "Accept": "application/vnd.github.v3+json",
-                            },
-                            json={"ref": "feature/cloud-processing"},
-                            timeout=10,
-                        )
-                        if res.status_code == 204:
-                            st.success("Cloud ingestion workflow dispatched to GitHub Actions!")
-                        else:
-                            st.warning(f"Workflow dispatch returned HTTP {res.status_code}.")
+                    branch_ref = (
+                        config.env("GITHUB_REF_NAME")
+                        or (st.secrets.get("GITHUB_REF_NAME") if hasattr(st, "secrets") and "GITHUB_REF_NAME" in st.secrets else None)
+                        or "feature/cloud-processing"
+                    )
+                    if st.button(f"🚀 Dispatch Cloud Ingestion Workflow ({branch_ref})", width="stretch"):
+                        try:
+                            import requests
+                            res = requests.post(
+                                f"https://api.github.com/repos/{gh_repo}/actions/workflows/mediaintel-cloud-pipeline.yml/dispatches",
+                                headers={
+                                    "Authorization": f"Bearer {gh_token}",
+                                    "Accept": "application/vnd.github.v3+json",
+                                },
+                                json={"ref": branch_ref},
+                                timeout=10,
+                            )
+                            if res.status_code == 204:
+                                st.success(f"Cloud ingestion workflow dispatched to GitHub Actions on '{branch_ref}'!")
+                            else:
+                                st.warning(f"Workflow dispatch returned HTTP {res.status_code}.")
+                        except Exception as exc:
+                            st.error(f"Failed to dispatch workflow: {type(exc).__name__}")
                 else:
                     st.caption("ℹ️ Cloud pipeline executes automatically on schedule via GitHub Actions.")
 

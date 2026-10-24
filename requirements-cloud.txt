@@ -13,6 +13,7 @@ python-dotenv>=1.0,<2
 # Optional database support used by core/config.py
 PyMySQL>=1.1,<2
 psycopg[binary]>=3.2,<4
+requests>=2.31,<3
 
 # Dashboard reporting dependencies
 reportlab>=4.2,<5
