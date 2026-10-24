@@ -14,18 +14,18 @@ def load_all() -> dict[str, pd.DataFrame]:
     """Everything the reports need, straight from MySQL."""
     q = config.read_sql
     return {
-        "channels": q("SELECT * FROM channels WHERE is_tracked = 1"),
-        "videos": q("SELECT v.* FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1"),
+        "channels": q("SELECT * FROM channels WHERE is_tracked = TRUE"),
+        "videos": q("SELECT v.* FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE"),
         "insights": q("""SELECT s.* FROM sentiment_insights s JOIN comments m ON m.comment_id = s.comment_id
                            JOIN videos v ON v.video_id = m.video_id JOIN channels c ON c.channel_id = v.channel_id
-                           WHERE c.is_tracked = 1"""),
+                           WHERE c.is_tracked = TRUE"""),
         "aspects": q("""SELECT a.* FROM aspect_sentiments a JOIN comments m ON m.comment_id = a.comment_id
                         JOIN videos v ON v.video_id = m.video_id JOIN channels c ON c.channel_id = v.channel_id
-                        WHERE c.is_tracked = 1"""),
+                        WHERE c.is_tracked = TRUE"""),
         "relevance": q("""
             SELECT r.*, v.title, v.channel_id, c.channel_name
             FROM video_relevance r JOIN videos v ON v.video_id = r.video_id
-            JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1"""),
+            JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE"""),
         "topics": q("""
             SELECT t.*, COALESCE(c.channel_name, 'All channels') AS channel_name
             FROM topic_suggestions t LEFT JOIN channels c ON c.channel_id = t.scope
@@ -36,7 +36,7 @@ def load_all() -> dict[str, pd.DataFrame]:
             SELECT a.detected_at, a.metric, a.velocity, a.baseline, a.ratio, a.severity, a.emailed, v.title, c.channel_name
             FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
             JOIN channels c ON c.channel_id = a.channel_id
-            WHERE a.detected_at >= :cut AND c.is_tracked = 1 ORDER BY a.detected_at DESC""",
+            WHERE a.detected_at >= :cut AND c.is_tracked = TRUE ORDER BY a.detected_at DESC""",
                    {"cut": config.utcnow() - pd.Timedelta(days=7)}),
     }
 

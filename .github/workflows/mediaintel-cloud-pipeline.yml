@@ -1,0 +1,194 @@
+name: MediaIntel Cloud Pipeline
+
+# Scheduled automated execution for end-to-end cloud intelligence.
+# Schedule:
+#   - 02:00 UTC = 07:30 AM IST (Indian Standard Time, UTC + 05:30)
+#   - 14:00 UTC = 07:30 PM IST (Indian Standard Time, UTC + 05:30)
+# Runs twice daily within GitHub Actions 2,000 free-tier runner minutes/month.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      run_ingestion:
+        description: 'Run YouTube data ingestion'
+        required: true
+        type: boolean
+        default: true
+      run_ai:
+        description: 'Run RoBERTa sentiment, relevance, and anomaly analytics'
+        required: true
+        type: boolean
+        default: true
+      run_whisper:
+        description: 'Run Storage-only Whisper worker for pending audio assets'
+        required: true
+        type: boolean
+        default: true
+      video_limit:
+        description: 'Max videos per tracked channel to ingest (bounded free-tier)'
+        required: false
+        type: string
+        default: '5'
+      sentiment_limit:
+        description: 'Max unanalysed comments to process with RoBERTa'
+        required: false
+        type: string
+        default: '150'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mediaintel-cloud-pipeline
+  cancel-in-progress: false
+
+jobs:
+  ingest-youtube:
+    name: Cloud YouTube Ingestion
+    if: github.event_name == 'schedule' || inputs.run_ingestion == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-ingestion.txt
+
+      - name: Install ingestion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ingestion.txt
+
+      - name: Verify required secrets
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          test -n "$YOUTUBE_API_KEY" || { echo "Missing YOUTUBE_API_KEY"; exit 1; }
+          echo "Configuration verified for ingestion."
+
+      - name: Ingest latest competitor videos and comments
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          MEDIAINTEL_CHANNEL_SOURCE: database
+          INPUT_VIDEO_LIMIT: ${{ inputs.video_limit }}
+          COMMENT_PAGES: '2'
+          INGEST_WORKERS: '2'
+        run: |
+          LIMIT="${INPUT_VIDEO_LIMIT:-5}"
+          export MEDIAINTEL_INGEST_VIDEO_LIMIT="$LIMIT"
+          python -m core.youtube_ingest
+
+  ai-analytics:
+    name: Cloud AI & Analytics Pipeline
+    needs: [ingest-youtube]
+    if: always() && (github.event_name == 'schedule' || inputs.run_ai == true) && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-ai.txt
+
+      - name: Install AI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ai.txt
+
+      - name: Verify database secret
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          echo "Database configuration verified for AI stages."
+
+      - name: Run RoBERTa sentiment and ABSA analysis
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          INPUT_SENTIMENT_LIMIT: ${{ inputs.sentiment_limit }}
+          SENTIMENT_BATCH: '8'
+          NLP_CHUNK: '50'
+          QUANTIZE: '0'
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          LIMIT="${INPUT_SENTIMENT_LIMIT:-150}"
+          python -m core.nlp_pipeline --limit "$LIMIT"
+
+      - name: Compute relevance and next-video topic suggestions
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python -m core.relevance_topics
+
+      - name: Detect metric anomalies and velocity spikes
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python -m core.anomaly_alert
+
+  whisper-transcription:
+    name: Cloud Whisper Transcription
+    needs: [ingest-youtube]
+    if: always() && (github.event_name == 'schedule' || inputs.run_whisper == true) && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-whisper.txt
+
+      - name: Install FFmpeg and Whisper dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-whisper.txt
+
+      - name: Verify Supabase configuration
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          test -n "$SUPABASE_URL" || { echo "Missing SUPABASE_URL"; exit 1; }
+          test -n "$SUPABASE_SECRET_KEY" || { echo "Missing SUPABASE_SECRET_KEY"; exit 1; }
+          echo "Storage and database configuration verified."
+
+      - name: Process pending audio assets via Faster-Whisper
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          WHISPER_MODEL: tiny
+          WHISPER_COMPUTE: int8
+          OMP_NUM_THREADS: '2'
+        run: |
+          python -m core.cloud_whisper_worker --limit 2 --max-seconds 600

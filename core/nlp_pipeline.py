@@ -98,7 +98,7 @@ def _pending(limit: int | None, reprocess_all: bool, model_name: str):
         JOIN videos v ON v.video_id = c.video_id
         JOIN channels ch ON ch.channel_id = v.channel_id
         LEFT JOIN sentiment_insights s ON s.comment_id = c.comment_id
-        WHERE ch.is_tracked = 1""")
+        WHERE ch.is_tracked = TRUE""")
     if df.empty:
         return df
     df = df.sort_values(["video_id", "like_count", "published_at"], ascending=[True, False, False])
@@ -129,7 +129,7 @@ def _write_chunk(ids: list[str], results: list[dict], model_name: str) -> None:
             conn.execute(text("""
                 INSERT INTO aspect_sentiments (comment_id, aspect, sentiment_label, polarity, confidence, evidence)
                 VALUES (:cid, :a, :l, :p, :c, :e)"""), aspect_rows)
-        conn.execute(text("UPDATE comments SET is_processed = 1 WHERE comment_id IN :ids")
+        conn.execute(text("UPDATE comments SET is_processed = TRUE WHERE comment_id IN :ids")
                      .bindparams(bindparam("ids", expanding=True)), {"ids": ids})
 
 

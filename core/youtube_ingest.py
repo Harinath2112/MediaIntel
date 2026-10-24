@@ -142,7 +142,7 @@ COMMENT_COLS = ["comment_id", "video_id", "author_name", "comment_text", "like_c
 
 def _comment_rows(comments):
     return [{"comment_id": c["comment_id"], "video_id": c["video_id"], "author_name": c["author"][:250],
-             "comment_text": c["text"], "like_count": c["likes"], "published_at": c["published_at"], "is_processed": 0}
+             "comment_text": c["text"], "like_count": c["likes"], "published_at": c["published_at"], "is_processed": False}
             for c in comments]
 
 
@@ -156,10 +156,32 @@ def ingest_competitor_data() -> None:
 
     with engine.connect() as conn:
         channels = conn.execute(text(
-            "SELECT channel_id, channel_name FROM channels WHERE is_tracked = 1")).fetchall()
+            "SELECT channel_id, channel_name FROM channels WHERE is_tracked = TRUE")).fetchall()
+    
     if not channels:
         print("WARNING: no tracked channels in the database. Add rows to the `channels` table first.")
         return
+
+    # Optional single-channel mode for controlled cloud ingestion.
+    selected_channel = config.env("MEDIAINTEL_INGEST_CHANNEL_ID")
+    if selected_channel:
+        channels = [
+            row for row in channels
+            if row[0] == selected_channel
+        ]
+        if not channels:
+            raise SystemExit(
+                "ERROR: Selected channel is not tracked or does not exist."
+            )
+
+    # Optional per-channel video limit for cloud testing.
+    video_limit = VIDEOS_PER_CHANNEL
+    if config.env("MEDIAINTEL_INGEST_VIDEO_LIMIT"):
+        video_limit = min(
+            max(config.env_int("MEDIAINTEL_INGEST_VIDEO_LIMIT", 2), 1),
+            50
+        )
+
 
     now = config.utcnow()
     upsert_video = config.upsert_sql("videos", VIDEO_COLS, ["video_id"],
@@ -177,7 +199,7 @@ def ingest_competitor_data() -> None:
                     print(f"  ERROR: could not find uploads playlist for {channel_name} - check its channel_id")
                     failed_channels += 1
                     continue
-                video_ids = client.recent_video_ids(playlist, VIDEOS_PER_CHANNEL)
+                video_ids = client.recent_video_ids(playlist, video_limit)
                 details = client.video_details(video_ids) if video_ids else []
             except QuotaExceeded:
                 raise

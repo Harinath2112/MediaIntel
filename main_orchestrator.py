@@ -190,7 +190,7 @@ def preflight(console, quick: bool) -> bool:
         from core import db_setup
         upgraded = db_setup.ensure_schema(verbose=False)
         synced = db_setup.sync_channels()
-        n = int(config.read_sql("SELECT COUNT(*) AS n FROM channels WHERE is_tracked = 1").iloc[0, 0])
+        n = int(config.read_sql("SELECT COUNT(*) AS n FROM channels WHERE is_tracked = TRUE").iloc[0, 0])
         good(f"Database ready ({config.db_label()})" + (f" - upgraded: {', '.join(upgraded)}" if upgraded else ""))
         if getattr(db_setup.sync_channels, "untracked", 0):
             warn(f"{db_setup.sync_channels.untracked} channel(s) in the database are not in target_channels.json - "
@@ -258,8 +258,8 @@ def highlights(console):
     try:
         from core import config
         topics = config.read_sql("SELECT topic, score FROM topic_suggestions WHERE scope = 'ALL' ORDER BY rank_no LIMIT 3")
-        pend = int(config.read_sql("SELECT COUNT(*) AS n FROM anomaly_alerts a JOIN channels c ON c.channel_id = a.channel_id WHERE a.emailed = 0 AND c.is_tracked = 1").iloc[0, 0])
-        rel = config.read_sql("SELECT ROUND(AVG(r.relevance_index),0) AS r FROM video_relevance r JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1").iloc[0, 0]
+        pend = int(config.read_sql("SELECT COUNT(*) AS n FROM anomaly_alerts a JOIN channels c ON c.channel_id = a.channel_id WHERE a.emailed = 0 AND c.is_tracked = TRUE").iloc[0, 0])
+        rel = config.read_sql("SELECT ROUND(AVG(r.relevance_index),0) AS r FROM video_relevance r JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE").iloc[0, 0]
         if len(topics):
             console.print("[bold]Next-video ideas:[/] " + "  ·  ".join(f"{i}. {t.topic}" for i, t in enumerate(topics.itertuples(), 1)))
         if rel == rel and rel is not None:

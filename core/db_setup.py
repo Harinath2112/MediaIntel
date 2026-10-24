@@ -1,4 +1,4 @@
-"""Database setup - works on SQLite (default) and MySQL.
+"""Database setup - works on SQLite (default), MySQL, and PostgreSQL.
 
 * creates every table that is missing, upgrades older databases in place (adds new columns)
 * NEVER drops or deletes anything
@@ -87,6 +87,20 @@ Table("transcripts", metadata,
       Column("attempts", Integer, server_default="0"),
       Column("last_error", String(255)),
       Column("updated_at", DateTime, server_default=NOW), **KW)
+
+Table("video_audio_assets", metadata,
+      Column("video_id", String(50), _fk("videos.video_id"), primary_key=True),
+      Column("bucket", String(100), nullable=False),
+      Column("object_path", String(500), nullable=False),
+      Column("status", String(20), nullable=False, server_default="pending"),
+      Column("attempts", Integer, nullable=False, server_default="0"),
+      Column("last_error", String(255)),
+      Column("claimed_at", DateTime),
+      Column("claim_token", String(100)),
+      Column("lease_expires_at", DateTime),
+      Column("created_at", DateTime, server_default=NOW),
+      Column("updated_at", DateTime, server_default=NOW),
+      UniqueConstraint("bucket", "object_path", name="uq_video_audio_storage_object"), **KW)
 
 Table("video_stats_history", metadata,
       Column("id", BIGINT_PK, primary_key=True, autoincrement=True),
@@ -233,6 +247,8 @@ def ensure_schema(verbose: bool = True) -> list[str]:
 
 def sync_channels() -> list[dict]:
     """Applies target_channels.json to the `channels` table. Adds / renames / (un)tracks, never deletes."""
+    if config.env("MEDIAINTEL_CHANNEL_SOURCE", "").lower() == "database":
+        return []
     path = config.CHANNELS_FILE
     if not path.exists():
         return []
@@ -246,7 +262,7 @@ def sync_channels() -> list[dict]:
         if not cid:
             continue
         rows.append({"channel_id": cid, "channel_name": (it.get("name") or it.get("channel_name") or cid)[:100],
-                     "is_tracked": 1 if it.get("is_tracked", True) else 0})
+                     "is_tracked": bool(it.get("is_tracked", True))})
     if rows:
         from sqlalchemy import bindparam
         with config.get_engine().begin() as conn:
@@ -254,8 +270,15 @@ def sync_channels() -> list[dict]:
                                            ["channel_name", "is_tracked"]), rows)
             # the JSON file is the source of truth for WHAT IS TRACKED: channels missing from it are untracked
             # (hidden from every stage and report) - their stored data is kept, never deleted
-            gone = conn.execute(text("UPDATE channels SET is_tracked = 0 WHERE is_tracked = 1 AND channel_id NOT IN :ids")
-                                .bindparams(bindparam("ids", expanding=True)), {"ids": [r["channel_id"] for r in rows]})
+            
+            gone = conn.execute(
+                text(
+                    "UPDATE channels SET is_tracked = FALSE "
+                    "WHERE is_tracked = TRUE AND channel_id NOT IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": [r["channel_id"] for r in rows]}
+            )
+
             sync_channels.untracked = gone.rowcount or 0
     return rows
 

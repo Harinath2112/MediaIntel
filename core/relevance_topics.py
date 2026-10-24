@@ -224,14 +224,14 @@ def load_data():
                t.source AS tsource, t.transcript_text, t.updated_at AS transcript_updated_at
         FROM videos v JOIN channels c ON c.channel_id = v.channel_id
         LEFT JOIN transcripts t ON t.video_id = v.video_id
-        WHERE c.is_tracked = 1""")
+        WHERE c.is_tracked = TRUE""")
     comments = config.read_sql("""
         SELECT c.comment_id, c.video_id, c.comment_text, COALESCE(c.like_count, 0) AS like_count,
                v.channel_id, s.polarity, s.aspect_category
         FROM comments c JOIN videos v ON v.video_id = c.video_id
         JOIN channels ch ON ch.channel_id = v.channel_id
         LEFT JOIN sentiment_insights s ON s.comment_id = c.comment_id
-        WHERE ch.is_tracked = 1""")
+        WHERE ch.is_tracked = TRUE""")
     requests_ = config.read_sql("SELECT DISTINCT comment_id FROM aspect_sentiments WHERE aspect = 'Feature Request'")
     existing = config.read_sql("SELECT video_id, n_comments, text_source, computed_at FROM video_relevance")
     return videos, comments, set(requests_["comment_id"]), existing

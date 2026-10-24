@@ -1,0 +1,218 @@
+
+name: MediaIntel Cloud Runner Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ingestion:
+        description: 'Run the controlled Apna College ingestion test?'
+        required: true
+        type: boolean
+        default: false
+      run_sentiment:
+        description: 'Run the controlled RoBERTa sentiment test (5 comments)?'
+        required: true
+        type: boolean
+        default: false
+      run_whisper:
+        description: 'Run the isolated Whisper transcription test (Supabase Storage audio)?'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-cloud-runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PostgreSQL driver
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]"
+
+      - name: Test Supabase connection
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import psycopg
+
+          url = os.environ.get("MEDIAINTEL_DB_URL")
+          if not url:
+              sys.exit("ERROR: MEDIAINTEL_DB_URL secret is missing.")
+
+          if url.startswith("postgresql+psycopg://"):
+              url = "postgresql://" + url.split("://", 1)[1]
+
+          try:
+              with psycopg.connect(url, connect_timeout=15) as conn:
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT COUNT(*) FROM channels")
+                      channel_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT COUNT(*) FROM videos")
+                      video_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT COUNT(*) FROM comments")
+                      comment_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT COUNT(*) FROM channels WHERE is_tracked = TRUE")
+                      tracked_count = cur.fetchone()[0]
+
+                      cur.execute(
+                          "SELECT channel_name, is_tracked FROM channels WHERE channel_id = %s",
+                          ("UCBwmMxybNva6P_5VmxjzwqA",)
+                      )
+                      apna_channel = cur.fetchone()
+
+                      cur.execute("SELECT COUNT(*) FROM video_audio_assets")
+                      audio_mapping_count = cur.fetchone()[0]
+
+                      cur.execute("SELECT status, COUNT(*) FROM video_audio_assets GROUP BY status ORDER BY status")
+                      audio_status_counts = cur.fetchall()
+
+              print("Supabase PostgreSQL connection successful!")
+              print(f"Channels: {channel_count}")
+              print(f"Videos: {video_count}")
+              print(f"Comments: {comment_count}")
+              print(f"Tracked channels: {tracked_count}")
+              print(f"Apna College: {apna_channel}")
+              print(f"Audio mappings: {audio_mapping_count}")
+              print(f"Audio mapping statuses: {audio_status_counts}")
+              print("Read-only database verification passed.")
+
+          except Exception as exc:
+              print(f"Database connection failed: {type(exc).__name__}")
+              sys.exit(1)
+          PY
+
+  ingest-one-channel:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/cloud-processing' && inputs.run_ingestion == true
+    needs: test-cloud-runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ingestion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ingestion.txt
+
+      - name: Verify required secrets
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || exit 1
+          test -n "$YOUTUBE_API_KEY" || exit 1
+          echo "Required secrets are configured."
+
+      - name: Ingest Apna College test data
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          MEDIAINTEL_CHANNEL_SOURCE: database
+          MEDIAINTEL_INGEST_CHANNEL_ID: UCBwmMxybNva6P_5VmxjzwqA
+          MEDIAINTEL_INGEST_VIDEO_LIMIT: '2'
+          COMMENT_PAGES: '1'
+          INGEST_WORKERS: '1'
+        run: |
+          python -m core.youtube_ingest
+
+  test-roberta-sentiment:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/cloud-processing' && inputs.run_sentiment == true
+    needs: test-cloud-runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install AI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ai.txt
+
+      - name: Verify Supabase secret
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || exit 1
+          echo "Supabase secret configured."
+
+      - name: Run controlled RoBERTa sentiment analysis
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SENTIMENT_BATCH: '4'
+          NLP_CHUNK: '5'
+          QUANTIZE: '0'
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          python -m core.nlp_pipeline --limit 5
+
+  test-whisper-transcription:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/cloud-processing' && inputs.run_whisper == true
+    needs: test-cloud-runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Whisper dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-whisper.txt
+
+      - name: Verify Supabase Storage configuration
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          test -n "$SUPABASE_URL" || { echo "Missing SUPABASE_URL"; exit 1; }
+          test -n "$SUPABASE_SECRET_KEY" || { echo "Missing SUPABASE_SECRET_KEY"; exit 1; }
+          echo "Supabase Storage configuration verified."
+
+      - name: Run isolated Whisper transcription test
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          OMP_NUM_THREADS: '2'
+        run: |
+          python scripts/test_cloud_whisper.py
