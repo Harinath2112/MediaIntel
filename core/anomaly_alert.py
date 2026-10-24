@@ -67,7 +67,7 @@ def detect() -> list[dict]:
         SELECT v.video_id, v.title, v.channel_id, c.channel_name, v.view_count, v.like_count,
                v.comment_count, v.published_at, v.fetched_at
         FROM videos v JOIN channels c ON c.channel_id = v.channel_id
-        WHERE v.published_at IS NOT NULL AND c.is_tracked = 1""")
+        WHERE v.published_at IS NOT NULL AND c.is_tracked = TRUE""")
     if vids.empty:
         return []
     now = config.utcnow()
@@ -115,7 +115,7 @@ def pending_alerts() -> pd.DataFrame:
                v.title, c.channel_name
         FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
         JOIN channels c ON c.channel_id = a.channel_id
-        WHERE a.emailed = 0 AND c.is_tracked = 1 ORDER BY a.ratio DESC""")
+        WHERE a.emailed = 0 AND c.is_tracked = TRUE ORDER BY a.ratio DESC""")
 
 
 def alerts_for_report(limit: int = MAX_ALERTS) -> tuple[pd.DataFrame, int]:
@@ -127,7 +127,7 @@ def alerts_for_report(limit: int = MAX_ALERTS) -> tuple[pd.DataFrame, int]:
                v.title, c.channel_name
         FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
         JOIN channels c ON c.channel_id = a.channel_id
-        WHERE c.is_tracked = 1 AND """
+        WHERE c.is_tracked = TRUE AND """
     new = config.read_sql(base + "a.emailed = 0 ORDER BY a.ratio DESC, a.id")
     total_new = len(new)
     frames = [new.head(limit)]

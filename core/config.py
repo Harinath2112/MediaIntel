@@ -144,12 +144,28 @@ def database_url(with_database: bool = True) -> str:
     if not explicit:
         try:
             import streamlit as st
-            explicit = st.secrets.get("MEDIAINTEL_DB_URL")
-        except (ImportError, FileNotFoundError, KeyError):
+            explicit = (
+                st.secrets.get("MEDIAINTEL_DB_URL")
+                or st.secrets.get("DATABASE_URL")
+                or (st.secrets.get("postgres", {}) or {}).get("url")
+                or (st.secrets.get("connections", {}) or {}).get("supabase", {}).get("url")
+            )
+        except Exception:
             pass
     if explicit and with_database:
         if explicit.startswith("sqlite:///") and not explicit.startswith("sqlite:////") and ":" not in explicit[10:]:
             return "sqlite:///" + str((WORK / explicit[10:]).resolve())      # relative path -> inside the project
+
+        # Normalize postgres / postgresql to postgresql+psycopg if psycopg is installed
+        if explicit.startswith("postgres://"):
+            explicit = "postgresql://" + explicit[11:]
+        if explicit.startswith("postgresql://") and not explicit.startswith("postgresql+"):
+            try:
+                import psycopg  # noqa: F401
+                explicit = "postgresql+psycopg://" + explicit[13:]
+            except ImportError:
+                pass
+
         return explicit
     db_type = (env("DB_TYPE") or ("mysql" if any(os.getenv(k) for k in ("DB_HOST", "DB_USER", "DB_NAME")) else "sqlite")).lower()
     if db_type == "mysql":
@@ -196,6 +212,13 @@ def get_engine():
                 cur.execute("PRAGMA journal_mode=WAL")
                 cur.execute("PRAGMA busy_timeout=60000")
                 cur.close()
+        elif "postgresql" in url:
+            _engine = create_engine(
+                url,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+                connect_args={"sslmode": "require", "connect_timeout": 15},
+            )
         else:
             _engine = create_engine(url, pool_pre_ping=True, pool_recycle=1800)
     return _engine

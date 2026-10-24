@@ -94,13 +94,13 @@ class MediaIntelRPA:
             JOIN channels c ON c.channel_id = a.channel_id
             WHERE a.id IN ({", ".join(str(int(i)) for i in ids)}) ORDER BY a.ratio DESC""")
         kpi = config.read_sql("""
-            SELECT (SELECT COUNT(*) FROM channels WHERE is_tracked = 1) AS channels,
-                   (SELECT COUNT(*) FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1) AS videos,
+            SELECT (SELECT COUNT(*) FROM channels WHERE is_tracked = TRUE) AS channels,
+                   (SELECT COUNT(*) FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE) AS videos,
                    (SELECT COUNT(*) FROM sentiment_insights s JOIN comments m ON m.comment_id = s.comment_id
                       JOIN videos v ON v.video_id = m.video_id JOIN channels c ON c.channel_id = v.channel_id
-                      WHERE c.is_tracked = 1) AS comments,
+                      WHERE c.is_tracked = TRUE) AS comments,
                    (SELECT ROUND(AVG(r.relevance_index), 1) FROM video_relevance r JOIN videos v ON v.video_id = r.video_id
-                      JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = 1) AS relevance""").iloc[0]
+                      JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE) AS relevance""").iloc[0]
         topics = config.read_sql("SELECT topic, score, evidence FROM topic_suggestions "
                                  "WHERE scope = 'ALL' AND rank_no <= 5 ORDER BY rank_no")
         unit = {"views": "views/hr", "likes": "likes/hr", "comments": "comments/hr"}

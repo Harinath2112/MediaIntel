@@ -1,4 +1,4 @@
-"""Database setup - works on SQLite (default) and MySQL.
+"""Database setup - works on SQLite (default), MySQL, and PostgreSQL.
 
 * creates every table that is missing, upgrades older databases in place (adds new columns)
 * NEVER drops or deletes anything
@@ -87,6 +87,20 @@ Table("transcripts", metadata,
       Column("attempts", Integer, server_default="0"),
       Column("last_error", String(255)),
       Column("updated_at", DateTime, server_default=NOW), **KW)
+
+Table("video_audio_assets", metadata,
+      Column("video_id", String(50), _fk("videos.video_id"), primary_key=True),
+      Column("bucket", String(100), nullable=False),
+      Column("object_path", String(500), nullable=False),
+      Column("status", String(20), nullable=False, server_default="pending"),
+      Column("attempts", Integer, nullable=False, server_default="0"),
+      Column("last_error", String(255)),
+      Column("claimed_at", DateTime),
+      Column("claim_token", String(100)),
+      Column("lease_expires_at", DateTime),
+      Column("created_at", DateTime, server_default=NOW),
+      Column("updated_at", DateTime, server_default=NOW),
+      UniqueConstraint("bucket", "object_path", name="uq_video_audio_storage_object"), **KW)
 
 Table("video_stats_history", metadata,
       Column("id", BIGINT_PK, primary_key=True, autoincrement=True),

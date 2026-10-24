@@ -914,6 +914,175 @@ with tab_system:
             st.metric("Whisper Transcripts", int((transcripts_df["source"] == "whisper").sum()) if not transcripts_df.empty else 0)
             st.metric("Topic Suggestions", len(topics_df))
 
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.container(border=True):
+        section_title("⚙️", "Online Channel & Ingestion Management")
+        st.caption("Secure administrator controls for competitor onboarding, tracking toggles, and cloud ingestion telemetry.")
+
+        import hmac
+        import re
+
+        admin_secret = (
+            config.env("MEDIAINTEL_ADMIN_PASSWORD")
+            or config.env("ADMIN_PASSWORD")
+        )
+        if not admin_secret:
+            try:
+                admin_secret = st.secrets.get("MEDIAINTEL_ADMIN_PASSWORD") or st.secrets.get("ADMIN_PASSWORD")
+            except Exception:
+                pass
+
+        if not st.session_state.get("admin_authenticated", False):
+            st.markdown("#### 🔒 Administrator Sign In")
+            st.caption("Authentication is required to modify channel tracking or add new channels.")
+            col_pwd, col_btn = st.columns([3, 1])
+            with col_pwd:
+                entered_pwd = st.text_input(
+                    "Admin Password",
+                    type="password",
+                    placeholder="Enter server administrator password…",
+                    label_visibility="collapsed",
+                    key="admin_pwd_field",
+                )
+            with col_btn:
+                if st.button("🔑 Sign In", width="stretch"):
+                    if not admin_secret:
+                        st.warning("Server administrator password is not set (configure MEDIAINTEL_ADMIN_PASSWORD).")
+                    elif hmac.compare_digest(entered_pwd.strip().encode("utf-8"), admin_secret.strip().encode("utf-8")):
+                        st.session_state["admin_authenticated"] = True
+                        st.rerun()
+                    else:
+                        st.error("Invalid administrator password.")
+        else:
+            top_bar_1, top_bar_2 = st.columns([4, 1])
+            with top_bar_1:
+                st.markdown(
+                    '<span class="status-pill"><span class="dot"></span> Authenticated as Administrator</span>',
+                    unsafe_allow_html=True,
+                )
+            with top_bar_2:
+                if st.button("🚪 Sign Out", width="stretch"):
+                    st.session_state["admin_authenticated"] = False
+                    st.rerun()
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+
+            mgmt_c1, mgmt_c2 = st.columns(2)
+
+            with mgmt_c1:
+                st.markdown("##### ➕ Add YouTube Channel")
+                new_cid_input = st.text_input("Channel ID or URL", placeholder="UC... or https://youtube.com/channel/UC...", key="add_cid_in")
+                new_cname_input = st.text_input("Channel Name / Display Label", placeholder="e.g. Apna College, take U forward", key="add_cname_in")
+
+                if st.button("Register & Track Channel", width="stretch", key="btn_add_chan"):
+                    raw_id = new_cid_input.strip()
+                    m = re.search(r"channel/(UC[A-Za-z0-9_-]{22})", raw_id)
+                    cid = m.group(1) if m else raw_id
+
+                    if not re.match(r"^UC[A-Za-z0-9_-]{22}$", cid):
+                        st.error("Invalid YouTube Channel ID. Must be a 24-character ID starting with 'UC'.")
+                    else:
+                        cname = new_cname_input.strip() or cid
+                        try:
+                            config.execute(
+                                config.upsert_sql(
+                                    "channels",
+                                    ["channel_id", "channel_name", "is_tracked"],
+                                    ["channel_id"],
+                                    ["channel_name", "is_tracked"],
+                                ),
+                                {"channel_id": cid, "channel_name": cname[:100], "is_tracked": True},
+                            )
+                            st.cache_data.clear()
+                            st.success(f"Channel '{cname}' ({cid}) registered and tracking enabled!")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Failed to register channel: {type(exc).__name__}")
+
+            with mgmt_c2:
+                st.markdown("##### 🔀 Toggle Channel Tracking")
+                all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY channel_name")
+                if not all_channels_df.empty:
+                    channel_map = {
+                        f"{r.channel_name} ({'Tracked' if r.is_tracked else 'Untracked'})": (r.channel_id, bool(r.is_tracked))
+                        for r in all_channels_df.itertuples()
+                    }
+                    selected_toggle_label = st.selectbox("Select Channel", list(channel_map.keys()), key="toggle_sel_ch")
+                    target_cid, current_state = channel_map[selected_toggle_label]
+                    new_state = not current_state
+                    btn_label = "🚫 Disable Tracking" if current_state else "✅ Enable Tracking"
+
+                    if st.button(btn_label, width="stretch", key="btn_toggle_track"):
+                        try:
+                            config.execute(
+                                "UPDATE channels SET is_tracked = :tracked WHERE channel_id = :cid",
+                                {"tracked": new_state, "cid": target_cid},
+                            )
+                            st.cache_data.clear()
+                            st.success(f"Updated tracking status for {target_cid} to {'Tracked' if new_state else 'Untracked'}.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Update failed: {type(exc).__name__}")
+                else:
+                    st.info("No channels in database yet.")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("##### 📡 Channel Ingestion & Processing Status")
+            try:
+                status_df = config.read_sql("""
+                    SELECT
+                        c.channel_name AS "Channel",
+                        c.channel_id AS "Channel ID",
+                        CASE WHEN c.is_tracked THEN 'Active' ELSE 'Inactive' END AS "Tracking",
+                        COUNT(DISTINCT v.video_id) AS "Videos",
+                        COUNT(DISTINCT m.comment_id) AS "Comments",
+                        COUNT(DISTINCT t.video_id) AS "Transcripts",
+                        MAX(v.published_at) AS "Latest Video"
+                    FROM channels c
+                    LEFT JOIN videos v ON v.channel_id = c.channel_id
+                    LEFT JOIN comments m ON m.video_id = v.video_id
+                    LEFT JOIN transcripts t ON t.video_id = v.video_id AND t.source IN ('whisper', 'captions')
+                    GROUP BY c.channel_id, c.channel_name, c.is_tracked
+                    ORDER BY c.is_tracked DESC, c.channel_name ASC
+                """)
+                st.dataframe(status_df, width="stretch", hide_index=True)
+            except Exception as exc:
+                st.error(f"Could not load status: {type(exc).__name__}")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            r_col1, r_col2 = st.columns([1, 1])
+            with r_col1:
+                if st.button("🔄 Refresh Dashboard Cache", width="stretch"):
+                    st.cache_data.clear()
+                    st.success("Dashboard cache refreshed.")
+                    st.rerun()
+            with r_col2:
+                gh_repo = config.env("GITHUB_REPOSITORY") or "Harinath2112/MediaIntel"
+                gh_token = config.env("GITHUB_TOKEN") or config.env("GH_PAT")
+                if not gh_token:
+                    try:
+                        gh_token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GH_PAT")
+                    except Exception:
+                        pass
+                if gh_token:
+                    if st.button("🚀 Dispatch Cloud Ingestion Workflow", width="stretch"):
+                        import requests
+                        res = requests.post(
+                            f"https://api.github.com/repos/{gh_repo}/actions/workflows/mediaintel-cloud-pipeline.yml/dispatches",
+                            headers={
+                                "Authorization": f"Bearer {gh_token}",
+                                "Accept": "application/vnd.github.v3+json",
+                            },
+                            json={"ref": "feature/cloud-processing"},
+                            timeout=10,
+                        )
+                        if res.status_code == 204:
+                            st.success("Cloud ingestion workflow dispatched to GitHub Actions!")
+                        else:
+                            st.warning(f"Workflow dispatch returned HTTP {res.status_code}.")
+                else:
+                    st.caption("ℹ️ Cloud pipeline executes automatically on schedule via GitHub Actions.")
+
 st.markdown(
     f'<p style="text-align:center; color:#475569; font-size:12px; margin-top:24px;">'
     f"MediaIntel Dashboard · Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>",
