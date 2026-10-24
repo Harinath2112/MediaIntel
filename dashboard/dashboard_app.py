@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import config  # noqa: E402
+from core import channel_manager  # noqa: E402
 from core import insights as report_helpers  # noqa: E402  (scorecard / Whisper / topic helpers shared with the PDF)
 
 LOGO = Path(__file__).resolve().parent / "assets" / "mediaintel_logo.png"
@@ -967,72 +968,76 @@ with tab_system:
 
             st.markdown("<hr>", unsafe_allow_html=True)
 
-            mgmt_c1, mgmt_c2 = st.columns(2)
+            st.markdown("<hr>", unsafe_allow_html=True)
 
-            with mgmt_c1:
-                st.markdown("##### ➕ Add YouTube Channel")
-                new_cid_input = st.text_input("Channel ID or URL", placeholder="UC... or https://youtube.com/channel/UC...", key="add_cid_in")
-                new_cname_input = st.text_input("Channel Name / Display Label", placeholder="e.g. Apna College, take U forward", key="add_cname_in")
+            # -----------------------------------------------------------
+            # Section 1: Channel Onboarding & Tracking Controls
+            # -----------------------------------------------------------
+            col_onboard, col_tracking = st.columns([3, 2])
 
-                if st.button("Register & Track Channel", width="stretch", key="btn_add_chan"):
-                    raw_id = new_cid_input.strip()
-                    cid = None
+            with col_onboard:
+                st.markdown("##### ➕ Competitor Channel Onboarding")
+                subtab_single, subtab_batch = st.tabs(["➕ Single Channel", "📑 Batch Onboard (2–5+ Channels)"])
 
-                    # 1. Match 24-character YouTube Channel ID starting with UC anywhere in the input
-                    m = re.search(r"(UC[A-Za-z0-9_-]{22})", raw_id)
-                    if m:
-                        cid = m.group(1)
-                    elif raw_id.startswith("@") or "youtube.com/@" in raw_id:
-                        # 2. Try handle resolution if YouTube API key is available
-                        handle_m = re.search(r"@([A-Za-z0-9_.-]+)", raw_id)
-                        if handle_m:
-                            handle_val = handle_m.group(1)
-                            yt_key = config.env("YOUTUBE_API_KEY")
-                            if not yt_key:
-                                try:
-                                    yt_key = st.secrets.get("YOUTUBE_API_KEY")
-                                except Exception:
-                                    pass
-                            if yt_key:
-                                try:
-                                    import requests
-                                    h_res = requests.get(
-                                        "https://www.googleapis.com/youtube/v3/channels",
-                                        params={"part": "id,snippet", "forHandle": handle_val, "key": yt_key},
-                                        timeout=8,
-                                    )
-                                    if h_res.status_code == 200:
-                                        items = h_res.json().get("items", [])
-                                        if items:
-                                            cid = items[0]["id"]
-                                            if not new_cname_input.strip():
-                                                new_cname_input = items[0]["snippet"].get("title", cid)
-                                except Exception:
-                                    pass
+                with subtab_single:
+                    new_cid_input = st.text_input("Channel ID, URL, or @Handle", placeholder="e.g. UCJskGeByzRRSvmOyZOz61ig, @ApnaCollegeOfficial, https://youtube.com/...", key="add_cid_in")
+                    new_cname_input = st.text_input("Display Label (Optional)", placeholder="e.g. take U forward", key="add_cname_in")
 
-                    if not cid or not re.match(r"^UC[A-Za-z0-9_-]{22}$", cid):
-                        st.error("Invalid YouTube Channel. Please provide a 24-character ID starting with 'UC' or a channel URL containing it.")
-                    else:
-                        cname = new_cname_input.strip() or cid
-                        try:
-                            config.execute(
-                                config.upsert_sql(
-                                    "channels",
-                                    ["channel_id", "channel_name", "is_tracked"],
-                                    ["channel_id"],
-                                    ["channel_name", "is_tracked"],
-                                ),
-                                {"channel_id": cid, "channel_name": cname[:100], "is_tracked": True},
-                            )
-                            st.cache_data.clear()
-                            st.success(f"Channel '{cname}' ({cid}) registered and tracking enabled!")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Failed to register channel: {type(exc).__name__}")
+                    if st.button("Register & Track Channel", width="stretch", key="btn_add_chan_single"):
+                        yt_key = config.env("YOUTUBE_API_KEY") or (st.secrets.get("YOUTUBE_API_KEY") if hasattr(st, "secrets") else None)
+                        cid, resolved_name, err = channel_manager.resolve_channel_identifier(new_cid_input, api_key=yt_key)
+                        if err or not cid:
+                            st.error(err or "Invalid YouTube channel identifier.")
+                        else:
+                            label = new_cname_input.strip() or resolved_name or cid
+                            res = channel_manager.register_single_channel(cid, channel_name=label, is_tracked=True)
+                            if res["success"]:
+                                st.cache_data.clear()
+                                st.success(res["message"])
+                                st.rerun()
+                            else:
+                                st.error(res["message"])
 
-            with mgmt_c2:
-                st.markdown("##### 🔀 Toggle Channel Tracking")
-                all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY channel_name")
+                with subtab_batch:
+                    st.caption("Paste multiple channels (one per line, comma-separated, or JSON array). Example: `UC... - Channel Name` or `@handle` or full URL.")
+                    batch_text = st.text_area(
+                        "Batch Channel Entries",
+                        placeholder="UCJskGeByzRRSvmOyZOz61ig - take U forward\nhttps://www.youtube.com/channel/UCBwmMxybNva6P_5VmxjzwqA - Apna College\n@GateSmashers\n@CodeWithHarry",
+                        height=130,
+                        key="add_batch_text_in"
+                    )
+
+                    b_c1, b_c2 = st.columns([2, 1])
+                    with b_c1:
+                        track_default = st.checkbox("Track channels immediately upon registration", value=True, key="batch_track_def")
+                    with b_c2:
+                        btn_batch = st.button("🚀 Register Batch", width="stretch", key="btn_add_chan_batch")
+
+                    if btn_batch:
+                        if not batch_text.strip():
+                            st.warning("Please enter at least one channel to register.")
+                        else:
+                            yt_key = config.env("YOUTUBE_API_KEY") or (st.secrets.get("YOUTUBE_API_KEY") if hasattr(st, "secrets") else None)
+                            batch_results = channel_manager.register_batch_channels(batch_text, api_key=yt_key, default_tracked=track_default)
+                            if not batch_results:
+                                st.warning("No valid channel identifiers found in input.")
+                            else:
+                                success_count = sum(1 for r in batch_results if r["success"])
+                                st.cache_data.clear()
+                                if success_count == len(batch_results):
+                                    st.success(f"Successfully processed all {success_count} channel(s)!")
+                                else:
+                                    st.info(f"Processed {len(batch_results)} entries: {success_count} succeeded, {len(batch_results) - success_count} failed.")
+
+                                with st.expander("View Batch Registration Ledger", expanded=True):
+                                    for r in batch_results:
+                                        icon = "✅" if r["success"] else "⚠️"
+                                        st.markdown(f"- {icon} **{r.get('channel_name') or r.get('raw')}**: {r.get('message')}")
+                                st.rerun()
+
+            with col_tracking:
+                st.markdown("##### 🔀 Channel Tracking Controls")
+                all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY is_tracked DESC, channel_name ASC")
                 if not all_channels_df.empty:
                     channel_map = {
                         f"{r.channel_name} ({'Tracked' if r.is_tracked else 'Untracked'})": (r.channel_id, bool(r.is_tracked))
@@ -1044,83 +1049,156 @@ with tab_system:
                     btn_label = "🚫 Disable Tracking" if current_state else "✅ Enable Tracking"
 
                     if st.button(btn_label, width="stretch", key="btn_toggle_track"):
-                        try:
-                            config.execute(
-                                "UPDATE channels SET is_tracked = :tracked WHERE channel_id = :cid",
-                                {"tracked": new_state, "cid": target_cid},
-                            )
+                        if channel_manager.set_channel_tracking(target_cid, new_state):
                             st.cache_data.clear()
-                            st.success(f"Updated tracking status for {target_cid} to {'Tracked' if new_state else 'Untracked'}.")
+                            st.success(f"Updated {target_cid} to {'Tracked' if new_state else 'Untracked'}.")
                             st.rerun()
-                        except Exception as exc:
-                            st.error(f"Update failed: {type(exc).__name__}")
+                        else:
+                            st.error("Failed to update tracking status.")
+                    st.caption("ℹ️ Disabled channels are excluded from cloud ingestion. Historical videos, comments, and analytics are preserved.")
                 else:
                     st.info("No channels in database yet.")
 
             st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("##### 📡 Channel Ingestion & Processing Status")
+
+            # -----------------------------------------------------------
+            # Section 2: Prominent Run Full Analysis Engine
+            # -----------------------------------------------------------
+            st.markdown("##### 🚀 On-Demand Cloud Analysis Engine")
+            st.caption("Execute serverless intelligence in GitHub Actions without running Python or Whisper on your laptop.")
+
+            gh_repo = config.env("GITHUB_REPOSITORY") or "Harinath2112/MediaIntel"
+            gh_token = config.env("GITHUB_TOKEN") or config.env("GH_PAT")
+            if not gh_token:
+                try:
+                    gh_token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GH_PAT")
+                except Exception:
+                    pass
+
+            branch_ref = (
+                config.env("GITHUB_REF_NAME")
+                or (st.secrets.get("GITHUB_REF_NAME") if hasattr(st, "secrets") and "GITHUB_REF_NAME" in st.secrets else None)
+                or "main"
+            )
+
+            p_c1, p_c2, p_c3 = st.columns([2, 1, 1])
+            with p_c1:
+                tracked_df = all_channels_df[all_channels_df["is_tracked"] == True] if not all_channels_df.empty else pd.DataFrame()
+                target_mode = st.radio(
+                    "Competitor Scope",
+                    [f"All Enabled Channels ({len(tracked_df)} channels)", "Selected Channel(s) Only"],
+                    horizontal=True,
+                    key="scope_radio"
+                )
+                target_cids_list = []
+                if "Selected" in target_mode and not tracked_df.empty:
+                    sel_chans = st.multiselect(
+                        "Select Competitors for this Run",
+                        options=tracked_df["channel_name"].tolist(),
+                        default=tracked_df["channel_name"].tolist()[:2],
+                        key="sel_run_chans"
+                    )
+                    target_cids_list = tracked_df[tracked_df["channel_name"].isin(sel_chans)]["channel_id"].tolist()
+            with p_c2:
+                v_limit = st.number_input("Max Videos / Channel", min_value=1, max_value=20, value=5, step=1, key="v_limit_in")
+            with p_c3:
+                s_limit = st.number_input("Max RoBERTa Comments", min_value=10, max_value=500, value=150, step=50, key="s_limit_in")
+
+            btn_run_analysis = st.button("🚀 Run Full Analysis", type="primary", width="stretch", key="btn_run_full_analysis")
+
+            if btn_run_analysis:
+                if not gh_token:
+                    st.error("⚠️ GitHub personal access token (`GITHUB_TOKEN`) is not configured. Please add `GITHUB_TOKEN = 'ghp_...'` in Streamlit Secrets or environment variables to dispatch workflows.")
+                else:
+                    with st.spinner("Dispatching cloud intelligence pipeline to GitHub Actions..."):
+                        dispatch_res = channel_manager.dispatch_cloud_pipeline(
+                            gh_token=gh_token,
+                            gh_repo=gh_repo,
+                            ref=branch_ref,
+                            channel_ids=target_cids_list,
+                            video_limit=v_limit,
+                            sentiment_limit=s_limit,
+                            run_whisper=True,
+                            force=False,
+                        )
+                        if dispatch_res["success"]:
+                            st.session_state["pipeline_dispatched"] = True
+                            st.session_state["pipeline_dispatched_at"] = datetime.now().strftime("%H:%M:%S")
+                            st.success(f"✅ {dispatch_res['message']} (Workflow Queued in GitHub Actions)")
+                        elif dispatch_res.get("status_code") == 409:
+                            active_r = dispatch_res.get("active_run", {})
+                            run_url = active_r.get("html_url", f"https://github.com/{gh_repo}/actions")
+                            st.warning(f"⚠️ {dispatch_res['message']} [Click here to view the active run in GitHub Actions]({run_url}).")
+                        else:
+                            st.error(f"❌ {dispatch_res['message']}")
+
+            # -----------------------------------------------------------
+            # Section 3: Live Processing Progress & Job Telemetry
+            # -----------------------------------------------------------
+            st.markdown("<hr>", unsafe_allow_html=True)
+            stat_h1, stat_h2 = st.columns([3, 1])
+            with stat_h1:
+                st.markdown("##### 📡 Cloud Pipeline Processing Status")
+            with stat_h2:
+                if st.button("🔄 Poll Status", width="stretch", key="btn_poll_pipeline"):
+                    st.rerun()
+
+            if gh_token:
+                recent_runs = channel_manager.get_latest_workflow_runs(gh_token, gh_repo, limit=2)
+                if recent_runs:
+                    latest_run = recent_runs[0]
+                    run_status = latest_run.get("status", "unknown")
+                    run_conclusion = latest_run.get("conclusion")
+                    run_id = latest_run.get("id")
+                    run_url = latest_run.get("html_url", "#")
+
+                    if run_status in ("queued", "waiting"):
+                        badge = f'<span class="status-pill" style="color:#fbbf24; border-color:rgba(251,191,36,0.3); background:rgba(251,191,36,0.12);"><span class="dot" style="background:#fbbf24;"></span> Run #{run_id}: Queued</span>'
+                    elif run_status == "in_progress":
+                        badge = f'<span class="status-pill" style="color:#60a5fa; border-color:rgba(96,165,250,0.3); background:rgba(96,165,250,0.12);"><span class="dot" style="background:#60a5fa;"></span> Run #{run_id}: Running in Cloud</span>'
+                    elif run_conclusion == "success":
+                        badge = f'<span class="status-pill"><span class="dot"></span> Run #{run_id}: Completed Successfully</span>'
+                    elif run_conclusion in ("failure", "timed_out"):
+                        badge = f'<span class="status-pill" style="color:#f87171; border-color:rgba(248,113,113,0.3); background:rgba(248,113,113,0.12);"><span class="dot" style="background:#f87171;"></span> Run #{run_id}: Failed (Check Logs)</span>'
+                    else:
+                        badge = f'<span class="status-pill"><span class="dot"></span> Run #{run_id}: {run_status} ({run_conclusion or "running"})</span>'
+
+                    st.markdown(f"{badge} &nbsp;&nbsp; 🔗 [Open Run #{run_id} in GitHub Actions ↗]({run_url})", unsafe_allow_html=True)
+
+                    jobs = channel_manager.get_workflow_run_jobs(run_id, gh_token, gh_repo)
+                    if jobs:
+                        j_cols = st.columns(len(jobs))
+                        for idx, job in enumerate(jobs):
+                            with j_cols[idx]:
+                                j_status = job.get("status", "")
+                                j_conc = job.get("conclusion") or j_status
+                                j_icon = "✅" if j_conc == "success" else ("🔄" if j_status == "in_progress" else ("⏳" if j_status == "queued" else ("❌" if j_conc == "failure" else "⚪")))
+                                st.markdown(f"**{j_icon} {job.get('name')}**\n\n`{j_conc.upper()}`")
+                else:
+                    st.info("No cloud pipeline runs found yet in GitHub Actions.")
+            else:
+                st.caption("ℹ️ Configure `GITHUB_TOKEN` in Streamlit Secrets to view live GitHub Actions run status and job stages.")
+
+            # -----------------------------------------------------------
+            # Section 4: Channel Ingestion Status Table & Refresh
+            # -----------------------------------------------------------
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("##### 📊 Channel Telemetry & Storage State")
             try:
-                status_df = config.read_sql("""
-                    SELECT
-                        c.channel_name AS "Channel",
-                        c.channel_id AS "Channel ID",
-                        CASE WHEN c.is_tracked THEN 'Active' ELSE 'Inactive' END AS "Tracking",
-                        COUNT(DISTINCT v.video_id) AS "Videos",
-                        COUNT(DISTINCT m.comment_id) AS "Comments",
-                        COUNT(DISTINCT t.video_id) AS "Transcripts",
-                        MAX(v.published_at) AS "Latest Video"
-                    FROM channels c
-                    LEFT JOIN videos v ON v.channel_id = c.channel_id
-                    LEFT JOIN comments m ON m.video_id = v.video_id
-                    LEFT JOIN transcripts t ON t.video_id = v.video_id AND t.source IN ('whisper', 'captions')
-                    GROUP BY c.channel_id, c.channel_name, c.is_tracked
-                    ORDER BY c.is_tracked DESC, c.channel_name ASC
-                """)
-                st.dataframe(status_df, width="stretch", hide_index=True)
+                telemetry_df = channel_manager.get_channel_telemetry_df()
+                st.dataframe(telemetry_df, width="stretch", hide_index=True)
             except Exception as exc:
-                st.error(f"Could not load status: {type(exc).__name__}")
+                st.error(f"Could not load channel telemetry: {type(exc).__name__}")
 
             st.markdown("<br>", unsafe_allow_html=True)
-            r_col1, r_col2 = st.columns([1, 1])
-            with r_col1:
-                if st.button("🔄 Refresh Dashboard Cache", width="stretch"):
+            ref_c1, ref_c2 = st.columns([1, 1])
+            with ref_c1:
+                if st.button("🔄 Refresh Results & Reload Data", width="stretch", key="btn_refresh_results"):
                     st.cache_data.clear()
-                    st.success("Dashboard cache refreshed.")
+                    st.success("Dashboard cache cleared. Fresh data loaded.")
                     st.rerun()
-            with r_col2:
-                gh_repo = config.env("GITHUB_REPOSITORY") or "Harinath2112/MediaIntel"
-                gh_token = config.env("GITHUB_TOKEN") or config.env("GH_PAT")
-                if not gh_token:
-                    try:
-                        gh_token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GH_PAT")
-                    except Exception:
-                        pass
-                if gh_token:
-                    branch_ref = (
-                        config.env("GITHUB_REF_NAME")
-                        or (st.secrets.get("GITHUB_REF_NAME") if hasattr(st, "secrets") and "GITHUB_REF_NAME" in st.secrets else None)
-                        or "feature/cloud-processing"
-                    )
-                    if st.button(f"🚀 Dispatch Cloud Ingestion Workflow ({branch_ref})", width="stretch"):
-                        try:
-                            import requests
-                            res = requests.post(
-                                f"https://api.github.com/repos/{gh_repo}/actions/workflows/mediaintel-cloud-pipeline.yml/dispatches",
-                                headers={
-                                    "Authorization": f"Bearer {gh_token}",
-                                    "Accept": "application/vnd.github.v3+json",
-                                },
-                                json={"ref": branch_ref},
-                                timeout=10,
-                            )
-                            if res.status_code == 204:
-                                st.success(f"Cloud ingestion workflow dispatched to GitHub Actions on '{branch_ref}'!")
-                            else:
-                                st.warning(f"Workflow dispatch returned HTTP {res.status_code}.")
-                        except Exception as exc:
-                            st.error(f"Failed to dispatch workflow: {type(exc).__name__}")
-                else:
-                    st.caption("ℹ️ Cloud pipeline executes automatically on schedule via GitHub Actions.")
+            with ref_c2:
+                st.caption("ℹ️ Once GitHub Actions indicates 'Completed Successfully', click 'Refresh Results' to display newly analyzed videos and sentiment.")
 
 st.markdown(
     f'<p style="text-align:center; color:#475569; font-size:12px; margin-top:24px;">'

@@ -1,15 +1,9 @@
 name: MediaIntel Cloud Pipeline
 
-# Scheduled automated execution for end-to-end cloud intelligence.
-# Schedule:
-#   - 02:00 UTC = 07:30 AM IST (Indian Standard Time, UTC + 05:30)
-#   - 14:00 UTC = 07:30 PM IST (Indian Standard Time, UTC + 05:30)
-# Runs twice daily within GitHub Actions 2,000 free-tier runner minutes/month.
+# On-demand cloud execution for end-to-end YouTube intelligence.
+# Triggered manually from the Streamlit Administrator Command Center.
 
 on:
-  schedule:
-    - cron: '0 2 * * *'
-    - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       run_ingestion:
@@ -27,6 +21,11 @@ on:
         required: true
         type: boolean
         default: true
+      channel_id:
+        description: 'Specific YouTube Channel ID(s) to process (comma-separated, or empty for all enabled)'
+        required: false
+        type: string
+        default: ''
       video_limit:
         description: 'Max videos per tracked channel to ingest (bounded free-tier)'
         required: false
@@ -48,7 +47,7 @@ concurrency:
 jobs:
   ingest-youtube:
     name: Cloud YouTube Ingestion
-    if: github.event_name == 'schedule' || inputs.run_ingestion == true
+    if: inputs.run_ingestion == true || inputs.run_ingestion == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -83,6 +82,7 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           MEDIAINTEL_CHANNEL_SOURCE: database
           INPUT_VIDEO_LIMIT: ${{ inputs.video_limit }}
+          MEDIAINTEL_INGEST_CHANNEL_ID: ${{ inputs.channel_id }}
           COMMENT_PAGES: '2'
           INGEST_WORKERS: '2'
         run: |
@@ -93,7 +93,7 @@ jobs:
   ai-analytics:
     name: Cloud AI & Analytics Pipeline
     needs: [ingest-youtube]
-    if: always() && (github.event_name == 'schedule' || inputs.run_ai == true) && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    if: always() && (inputs.run_ai == true || inputs.run_ai == 'true') && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -149,7 +149,7 @@ jobs:
   whisper-transcription:
     name: Cloud Whisper Transcription
     needs: [ingest-youtube]
-    if: always() && (github.event_name == 'schedule' || inputs.run_whisper == true) && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    if: always() && (inputs.run_whisper == true || inputs.run_whisper == 'true') && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 

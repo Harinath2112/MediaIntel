@@ -162,17 +162,19 @@ def ingest_competitor_data() -> None:
         print("WARNING: no tracked channels in the database. Add rows to the `channels` table first.")
         return
 
-    # Optional single-channel mode for controlled cloud ingestion.
-    selected_channel = config.env("MEDIAINTEL_INGEST_CHANNEL_ID")
-    if selected_channel:
-        channels = [
-            row for row in channels
-            if row[0] == selected_channel
-        ]
-        if not channels:
-            raise SystemExit(
-                "ERROR: Selected channel is not tracked or does not exist."
-            )
+    # Optional single or multi-channel mode for controlled cloud ingestion.
+    selected_channel_input = config.env("MEDIAINTEL_INGEST_CHANNEL_ID")
+    if selected_channel_input:
+        target_ids = {c.strip() for c in selected_channel_input.split(",") if c.strip()}
+        if target_ids:
+            channels = [
+                row for row in channels
+                if row[0] in target_ids
+            ]
+            if not channels:
+                raise SystemExit(
+                    "ERROR: None of the selected channels are tracked or exist in database."
+                )
 
     # Optional per-channel video limit for cloud testing.
     video_limit = VIDEOS_PER_CHANNEL
