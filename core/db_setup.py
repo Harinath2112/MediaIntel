@@ -148,6 +148,19 @@ Table("anomaly_alerts", metadata,
       Column("emailed", Integer, server_default="0"),
       Index("idx_alert_video_metric", "video_id", "metric", "detected_at"), **KW)
 
+Table("channel_run_coverage", metadata,
+      Column("channel_id", String(50), _fk("channels.channel_id"), primary_key=True),
+      Column("channel_name", String(100), nullable=False),
+      Column("target_videos", Integer, server_default="10"),
+      Column("selected_videos", Integer, server_default="0"),
+      Column("target_comments", Integer, server_default="1000"),
+      Column("collected_comments", Integer, server_default="0"),
+      Column("transcription_candidates", Integer, server_default="2"),
+      Column("completed_transcripts", Integer, server_default="0"),
+      Column("missing_data_reason", String(255)),
+      Column("last_run_status", String(50), server_default="success"),
+      Column("updated_at", DateTime, server_default=NOW), **KW)
+
 # columns added to databases created by earlier versions of the project: (table, column, DDL)
 COLUMN_MIGRATIONS = [
     ("videos", "description", "TEXT"),

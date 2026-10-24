@@ -27,15 +27,25 @@ on:
         type: string
         default: ''
       video_limit:
-        description: 'Max videos per tracked channel to ingest (bounded free-tier)'
+        description: 'Max videos per tracked channel to ingest (target 10 when available)'
         required: false
         type: string
-        default: '5'
+        default: '10'
+      comments_per_video:
+        description: 'Max top-level comments per selected video (ordered by relevance)'
+        required: false
+        type: string
+        default: '100'
+      transcripts_per_channel:
+        description: 'Top videos ranked by view count to select for transcription per channel'
+        required: false
+        type: string
+        default: '2'
       sentiment_limit:
         description: 'Max unanalysed comments to process with RoBERTa'
         required: false
         type: string
-        default: '150'
+        default: '800'
 
 permissions:
   contents: read
@@ -82,12 +92,15 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           MEDIAINTEL_CHANNEL_SOURCE: database
           INPUT_VIDEO_LIMIT: ${{ inputs.video_limit }}
+          INPUT_COMMENTS_PER_VIDEO: ${{ inputs.comments_per_video }}
           MEDIAINTEL_INGEST_CHANNEL_ID: ${{ inputs.channel_id }}
-          COMMENT_PAGES: '2'
+          COMMENT_PAGES: '1'
           INGEST_WORKERS: '2'
         run: |
-          LIMIT="${INPUT_VIDEO_LIMIT:-5}"
+          LIMIT="${INPUT_VIDEO_LIMIT:-10}"
+          COMMENTS_LIMIT="${INPUT_COMMENTS_PER_VIDEO:-100}"
           export MEDIAINTEL_INGEST_VIDEO_LIMIT="$LIMIT"
+          export MEDIAINTEL_INGEST_COMMENTS_PER_VIDEO="$COMMENTS_LIMIT"
           python -m core.youtube_ingest
 
   ai-analytics:
@@ -131,7 +144,7 @@ jobs:
           MKL_NUM_THREADS: '2'
           TOKENIZERS_PARALLELISM: 'false'
         run: |
-          LIMIT="${INPUT_SENTIMENT_LIMIT:-150}"
+          LIMIT="${INPUT_SENTIMENT_LIMIT:-800}"
           python -m core.nlp_pipeline --limit "$LIMIT"
 
       - name: Compute relevance and next-video topic suggestions
@@ -187,8 +200,10 @@ jobs:
           MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          INPUT_TRANSCRIPTS_PER_CHANNEL: ${{ inputs.transcripts_per_channel }}
           WHISPER_MODEL: tiny
           WHISPER_COMPUTE: int8
           OMP_NUM_THREADS: '2'
         run: |
-          python -m core.cloud_whisper_worker --limit 2 --max-seconds 600
+          TRANS_LIMIT="${INPUT_TRANSCRIPTS_PER_CHANNEL:-2}"
+          python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 600

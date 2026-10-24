@@ -192,25 +192,28 @@ def save(video_id, source, *, language=None, model=None, body=None, seconds=None
 
 
 def candidate_videos(limit: int | None = None):
-    """Videos still needing Whisper, with a per-channel rank (0 = next one to do for that channel).
-
-    Order inside a channel: videos with no transcript first, then caption-only ones (to upgrade), newest first.
-    """
+    """Rank the 10 selected active videos per channel by view_count DESC, published_at DESC, video_id ASC,
+    and select the top limit (default 2) videos for transcription."""
     df = config.read_sql("""
-        SELECT v.video_id, v.title, v.channel_id, v.published_at,
+        SELECT v.video_id, v.title, v.channel_id, v.published_at, COALESCE(v.view_count, 0) AS view_count,
                t.source AS tsource, COALESCE(t.attempts, 0) AS attempts
         FROM videos v
         JOIN channels c ON c.channel_id = v.channel_id
         LEFT JOIN transcripts t ON t.video_id = v.video_id
         WHERE c.is_tracked = TRUE
-          AND (t.video_id IS NULL OR (t.source IN ('captions', 'failed') AND t.attempts < :maxa))""",
+          AND (t.video_id IS NULL OR (t.source IN ('captions', 'failed', 'audio_unavailable') AND t.attempts < :maxa))""",
                          {"maxa": MAX_ATTEMPTS})
     if df.empty:
         return df
-    df["has_text"] = df["tsource"].map(lambda x: 0 if _src(x) in (None, "failed") else 1)
-    df = df.sort_values(["channel_id", "has_text", "published_at"], ascending=[True, True, False])
-    df["rank"] = df.groupby("channel_id").cumcount()
-    return df if not limit else df[df["rank"] < limit]
+    # Partition by channel and take top 10 most recent videos first (active analysis set)
+    df_sorted = df.sort_values(["channel_id", "published_at", "video_id"], ascending=[True, False, True])
+    df_active = df_sorted.groupby("channel_id").head(10).copy()
+
+    # Rank the active videos by view count descending with published_at and video_id as deterministic tie-breakers
+    df_ranked = df_active.sort_values(["channel_id", "view_count", "published_at", "video_id"],
+                                      ascending=[True, False, False, True]).copy()
+    df_ranked["rank"] = df_ranked.groupby("channel_id").cumcount()
+    return df_ranked if not limit else df_ranked[df_ranked["rank"] < limit]
 
 
 if config.env_bool("MEDIAINTEL_TEST_FAKES"):   # offline self-test hook

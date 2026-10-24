@@ -84,22 +84,44 @@ class YouTubeClient:
             })
         return out
 
-    def top_comments(self, video_id: str, pages: int = 1) -> list[dict]:
+    def top_comments(self, video_id: str, pages: int = 1, max_comments: int = 100) -> list[dict]:
+        from googleapiclient.errors import HttpError
         rows, token = [], None
+        seen_ids = set()
         for _ in range(pages):
-            resp = self._run(self._svc().commentThreads().list(
-                part="snippet", videoId=video_id, maxResults=100,
-                textFormat="plainText", pageToken=token))
+            try:
+                resp = self._run(self._svc().commentThreads().list(
+                    part="snippet", videoId=video_id, maxResults=min(100, max_comments),
+                    textFormat="plainText", order="relevance", pageToken=token))
+            except QuotaExceeded:
+                raise
+            except HttpError as exc:
+                err_str = str(exc).lower()
+                if "commentsdisabled" in err_str or getattr(exc, "status_code", None) in (403, 404):
+                    return rows
+                return rows
+            except Exception:
+                return rows
+
             for item in resp.get("items", []):
-                c = item["snippet"]["topLevelComment"]["snippet"]
+                cid = item.get("id")
+                if not cid or cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                c = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
                 rows.append({
-                    "comment_id": item["id"], "video_id": video_id,
-                    "author": c.get("authorDisplayName", ""), "text": c.get("textDisplay", ""),
-                    "likes": int(c.get("likeCount", 0)), "published_at": _parse_ts(c.get("publishedAt")),
+                    "comment_id": cid, "video_id": video_id,
+                    "author": (c.get("authorDisplayName") or "")[:250],
+                    "text": c.get("textDisplay") or "",
+                    "likes": int(c.get("likeCount", 0) or 0),
+                    "published_at": _parse_ts(c.get("publishedAt")),
                 })
-            token = resp.get("nextPageToken")
-            if not token:
+                if len(rows) >= max_comments:
+                    break
+
+            if len(rows) >= max_comments or not resp.get("nextPageToken"):
                 break
+            token = resp.get("nextPageToken")
         return rows
 
 
@@ -176,14 +198,28 @@ def ingest_competitor_data() -> None:
                     "ERROR: None of the selected channels are tracked or exist in database."
                 )
 
-    # Optional per-channel video limit for cloud testing.
-    video_limit = VIDEOS_PER_CHANNEL
+    # Bounded per-channel video limit (target exactly 10 when available)
+    video_limit = 10
     if config.env("MEDIAINTEL_INGEST_VIDEO_LIMIT"):
         video_limit = min(
-            max(config.env_int("MEDIAINTEL_INGEST_VIDEO_LIMIT", 2), 1),
+            max(config.env_int("MEDIAINTEL_INGEST_VIDEO_LIMIT", 10), 1),
             50
         )
+    elif VIDEOS_PER_CHANNEL:
+        video_limit = min(max(VIDEOS_PER_CHANNEL, 1), 50)
 
+    comments_per_video = min(
+        max(config.env_int("MEDIAINTEL_INGEST_COMMENTS_PER_VIDEO", 100), 1),
+        100
+    )
+
+    # Pre-execution Quota Estimation
+    est_units = len(channels) * (1 + 1 + 1 + video_limit)
+    print(f"\nYouTube Data API Quota Calculation:")
+    print(f"  Target Channels: {len(channels)}")
+    print(f"  Max Videos / Channel: {video_limit}")
+    print(f"  Max Top-Level Comments / Video: {comments_per_video}")
+    print(f"  Estimated API Quota: ~{est_units} units ({est_units / 10000 * 100:.2f}% of 10,000 daily free-tier limit)")
 
     now = config.utcnow()
     upsert_video = config.upsert_sql("videos", VIDEO_COLS, ["video_id"],
@@ -203,6 +239,13 @@ def ingest_competitor_data() -> None:
                     continue
                 video_ids = client.recent_video_ids(playlist, video_limit)
                 details = client.video_details(video_ids) if video_ids else []
+                # Deterministic sorting: published_at DESC, video_id ASC
+                details.sort(
+                    key=lambda d: (
+                        -(d["published_at"].timestamp() if d.get("published_at") else 0),
+                        d.get("video_id", "")
+                    )
+                )
             except QuotaExceeded:
                 raise
             except Exception as exc:
@@ -241,6 +284,16 @@ def ingest_competitor_data() -> None:
     except QuotaExceeded:
         print("\nERROR: YouTube API quota exhausted. Data collected so far is saved; try again tomorrow.")
         sys.exit(2)
+
+    # Update channel run coverage telemetry for auditing and dashboard
+    try:
+        from core import channel_manager
+        channel_manager.update_all_channel_run_coverage(
+            video_limit=video_limit,
+            target_cids=[c[0] for c in channels]
+        )
+    except Exception as exc:
+        print(f"Notice: Coverage telemetry update: {type(exc).__name__}")
 
     print(f"\nData ingestion complete: {total_videos} videos, {total_comments} comments synced"
           + (f" ({failed_channels} channel(s) failed)." if failed_channels else "."))

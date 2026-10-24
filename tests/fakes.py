@@ -56,7 +56,7 @@ class FakeYouTube:
                             comment_count=40))
         return out
 
-    def top_comments(self, vid, pages=1):
+    def top_comments(self, vid, pages=1, *args, **kwargs):
         rnd = random.Random(vid)
         words = " ".join(self.TOPICS.values()).split()
         rows = []

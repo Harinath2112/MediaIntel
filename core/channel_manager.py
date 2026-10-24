@@ -277,6 +277,209 @@ def get_channel_telemetry_df():
     return config.read_sql(sql)
 
 
+def get_active_analysis_videos_df(
+    limit_per_channel: int = 10,
+    channel_ids: list[str] | None = None,
+):
+    """Retrieve exactly up to limit_per_channel most recent videos per tracked channel.
+    
+    Deterministic order: published_at DESC, video_id ASC.
+    Preserves all historical records in warehouse while scoping current analysis set.
+    """
+    query = """
+        SELECT v.*, c.channel_name
+        FROM videos v
+        JOIN channels c ON c.channel_id = v.channel_id
+        WHERE c.is_tracked = TRUE
+    """
+    df = config.read_sql(query)
+    if df.empty:
+        return df
+
+    if channel_ids:
+        cid_set = set(channel_ids)
+        df = df[df["channel_id"].isin(cid_set)]
+        if df.empty:
+            return df
+
+    # Deterministic sort: published_at DESC, video_id ASC
+    df = df.sort_values(
+        by=["channel_id", "published_at", "video_id"],
+        ascending=[True, False, True]
+    )
+    return df.groupby("channel_id").head(limit_per_channel).reset_index(drop=True)
+
+
+def get_transcription_candidate_videos(
+    limit_per_channel: int = 2,
+    channel_ids: list[str] | None = None,
+):
+    """Rank the 10 selected active videos per channel by view count and select top 2.
+    
+    Deterministic ranking: view_count DESC, published_at DESC, video_id ASC.
+    """
+    active_v = get_active_analysis_videos_df(10, channel_ids=channel_ids)
+    if active_v.empty:
+        return active_v
+
+    # Deterministic ranking within each channel: view_count DESC, published_at DESC, video_id ASC
+    sorted_df = active_v.sort_values(
+        by=["channel_id", "view_count", "published_at", "video_id"],
+        ascending=[True, False, False, True]
+    )
+    return sorted_df.groupby("channel_id").head(limit_per_channel).reset_index(drop=True)
+
+
+def update_all_channel_run_coverage(
+    video_limit: int = 10,
+    target_cids: list[str] | None = None,
+) -> None:
+    """Compute and persist per-channel analysis coverage telemetry to channel_run_coverage table."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    channels_df = config.read_sql("SELECT channel_id, channel_name FROM channels WHERE is_tracked = TRUE ORDER BY channel_name ASC")
+    if channels_df.empty:
+        return
+
+    if target_cids:
+        c_set = set(target_cids)
+        channels_df = channels_df[channels_df["channel_id"].isin(c_set)]
+
+    active_videos_df = get_active_analysis_videos_df(limit_per_channel=video_limit)
+    candidate_videos_df = get_transcription_candidate_videos(limit_per_channel=2)
+
+    active_vids = set(active_videos_df["video_id"].tolist()) if not active_videos_df.empty else set()
+    candidate_vids = set(candidate_videos_df["video_id"].tolist()) if not candidate_videos_df.empty else set()
+
+    # Load comments and transcripts for active set
+    comments_df = config.read_sql("SELECT comment_id, video_id FROM comments")
+    transcripts_df = config.read_sql("SELECT video_id, source, transcript_text FROM transcripts")
+
+    active_comments = comments_df[comments_df["video_id"].isin(active_vids)] if not comments_df.empty else comments_df
+    candidate_transcripts = transcripts_df[transcripts_df["video_id"].isin(candidate_vids)] if not transcripts_df.empty else transcripts_df
+
+    coverage_rows = []
+    for row in channels_df.itertuples():
+        cid = row.channel_id
+        cname = row.channel_name
+
+        c_videos = active_videos_df[active_videos_df["channel_id"] == cid] if not active_videos_df.empty else active_videos_df
+        selected_v = len(c_videos)
+        target_v = video_limit
+
+        c_vids_set = set(c_videos["video_id"].tolist()) if not c_videos.empty else set()
+        c_comments = active_comments[active_comments["video_id"].isin(c_vids_set)] if not active_comments.empty else active_comments
+        collected_c = len(c_comments)
+        target_c = selected_v * 100
+
+        c_cand = candidate_videos_df[candidate_videos_df["channel_id"] == cid] if not candidate_videos_df.empty else candidate_videos_df
+        trans_candidates = min(selected_v, 2)
+        c_cand_set = set(c_cand["video_id"].tolist()) if not c_cand.empty else set()
+
+        completed_tx = 0
+        if not candidate_transcripts.empty and c_cand_set:
+            completed_tx = len(candidate_transcripts[
+                candidate_transcripts["video_id"].isin(c_cand_set) &
+                candidate_transcripts["source"].isin(["whisper", "captions"]) &
+                candidate_transcripts["transcript_text"].notna() &
+                (candidate_transcripts["transcript_text"].str.strip() != "")
+            ])
+
+        reasons = []
+        if selected_v == 0:
+            reasons.append("No public videos found on channel")
+        elif selected_v < target_v:
+            reasons.append(f"Channel published only {selected_v} eligible videos")
+        if selected_v > 0 and collected_c == 0:
+            reasons.append("Comments disabled or 0 comments published")
+        if trans_candidates > completed_tx:
+            reasons.append("Audio unavailable in Supabase Storage")
+
+        missing_reason = "; ".join(reasons) if reasons else "None"
+
+        if selected_v == 0:
+            status = "No Data"
+        elif completed_tx == trans_candidates and selected_v >= target_v:
+            status = "Completed"
+        elif completed_tx < trans_candidates and selected_v > 0:
+            status = "Pending Audio"
+        else:
+            status = "Partial"
+
+        coverage_rows.append({
+            "channel_id": cid,
+            "channel_name": cname,
+            "target_videos": target_v,
+            "selected_videos": selected_v,
+            "target_comments": target_c,
+            "collected_comments": collected_c,
+            "transcription_candidates": trans_candidates,
+            "completed_transcripts": completed_tx,
+            "missing_data_reason": missing_reason,
+            "last_run_status": status,
+            "updated_at": now,
+        })
+
+    if coverage_rows:
+        cols = [
+            "channel_id", "channel_name", "target_videos", "selected_videos",
+            "target_comments", "collected_comments", "transcription_candidates",
+            "completed_transcripts", "missing_data_reason", "last_run_status", "updated_at"
+        ]
+        upsert_stmt = config.upsert_sql(
+            "channel_run_coverage",
+            cols,
+            ["channel_id"],
+            ["channel_name", "target_videos", "selected_videos", "target_comments",
+             "collected_comments", "transcription_candidates", "completed_transcripts",
+             "missing_data_reason", "last_run_status", "updated_at"]
+        )
+        with config.get_engine().begin() as conn:
+            conn.execute(upsert_stmt, coverage_rows)
+
+
+def get_channel_run_coverage_df():
+    """Retrieve full per-channel analysis coverage table for Streamlit and auditing."""
+    try:
+        sql = """
+            SELECT
+                channel_name AS "Channel Name",
+                target_videos AS "Target Videos",
+                selected_videos AS "Selected Videos",
+                target_comments AS "Target Comments",
+                collected_comments AS "Collected Comments",
+                transcription_candidates AS "Transcription Candidates",
+                completed_transcripts AS "Completed Transcripts",
+                missing_data_reason AS "Missing Data Reason",
+                last_run_status AS "Last Run Status"
+            FROM channel_run_coverage
+            ORDER BY channel_name ASC
+        """
+        df = config.read_sql(sql)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+
+    # If empty or not yet generated, build dynamically
+    update_all_channel_run_coverage()
+    return config.read_sql("""
+        SELECT
+            channel_name AS "Channel Name",
+            target_videos AS "Target Videos",
+            selected_videos AS "Selected Videos",
+            target_comments AS "Target Comments",
+            collected_comments AS "Collected Comments",
+            transcription_candidates AS "Transcription Candidates",
+            completed_transcripts AS "Completed Transcripts",
+            missing_data_reason AS "Missing Data Reason",
+            last_run_status AS "Last Run Status"
+        FROM channel_run_coverage
+        ORDER BY channel_name ASC
+    """)
+
+
 def get_latest_workflow_runs(
     gh_token: str,
     gh_repo: str = "Harinath2112/MediaIntel",
@@ -339,8 +542,10 @@ def dispatch_cloud_pipeline(
     workflow_file: str = "mediaintel-cloud-pipeline.yml",
     ref: str = "main",
     channel_ids: str | list[str] = "",
-    video_limit: int = 5,
-    sentiment_limit: int = 150,
+    video_limit: int = 10,
+    comments_per_video: int = 100,
+    transcripts_per_channel: int = 2,
+    sentiment_limit: int = 800,
     run_whisper: bool = True,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -381,6 +586,8 @@ def dispatch_cloud_pipeline(
             "run_whisper": bool(run_whisper),
             "channel_id": channel_id_param,
             "video_limit": str(video_limit),
+            "comments_per_video": str(comments_per_video),
+            "transcripts_per_channel": str(transcripts_per_channel),
             "sentiment_limit": str(sentiment_limit),
         },
     }

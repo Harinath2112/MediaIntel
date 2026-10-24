@@ -286,7 +286,14 @@ st.markdown(f"""
 with st.sidebar:
     if LOGO.exists():
         st.image(str(LOGO), width=170)
-    st.markdown('<div class="sidebar-heading">🎯 Filters</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-heading">🎯 Data Scope & Filters</div>', unsafe_allow_html=True)
+
+    data_scope = st.radio(
+        "Analysis Scope",
+        ["🎯 Active Analysis Set (10 Recent / Channel)", "🏛️ All-Time Warehouse Records"],
+        index=0,
+        help="Active Analysis Set filters to the deterministic 10 most recent videos per channel for this run. All-Time Warehouse shows historical accumulation."
+    )
 
     selected_channel = st.selectbox(
         "Competitor channel",
@@ -312,7 +319,16 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # APPLY FILTERS
 # ---------------------------------------------------------------------------
-filtered_videos = videos.copy()
+if "Active" in data_scope and not videos.empty:
+    sorted_v = videos.sort_values(
+        by=["channel_id", "published_at", "video_id"],
+        ascending=[True, False, True]
+    )
+    base_videos = sorted_v.groupby("channel_id").head(10).copy()
+else:
+    base_videos = videos.copy()
+
+filtered_videos = base_videos.copy()
 if selected_channel != "All Channels":
     selected_cid = channels.loc[channels["channel_name"] == selected_channel, "channel_id"].values[0]
     filtered_videos = filtered_videos[filtered_videos["channel_id"] == selected_cid]
@@ -333,12 +349,25 @@ k1, k2, k3, k4 = st.columns(4)
 with k1:
     kpi_card("📺", "Tracked Competitors", len(channels), PALETTE[0])
 with k2:
-    kpi_card("🎬", "Audited Videos", f"{len(filtered_videos):,}", PALETTE[1])
+    if "Active" in data_scope:
+        kpi_card("🎬", "Active Audited Videos", f"{len(filtered_videos):,} <span style='font-size:12px;color:#94a3b8;font-weight:400;'>({len(videos)} in warehouse)</span>", PALETTE[1])
+    else:
+        kpi_card("🎬", "Warehouse Videos", f"{len(filtered_videos):,}", PALETTE[1])
 with k3:
-    kpi_card("💬", "Audited Comments", f"{len(filtered_insights):,}", PALETTE[2])
+    if "Active" in data_scope:
+        kpi_card("💬", "Active Audited Comments", f"{len(filtered_insights):,} <span style='font-size:12px;color:#94a3b8;font-weight:400;'>({len(insights)} in warehouse)</span>", PALETTE[2])
+    else:
+        kpi_card("💬", "Warehouse Comments", f"{len(filtered_insights):,}", PALETTE[2])
 with k4:
     avg_conf = (filtered_insights["sentiment_score"].mean() * 100) if not filtered_insights.empty else 0
     kpi_card("🧠", "Mean AI Confidence", f"{avg_conf:.1f}%", PALETTE[3])
+
+# Channel coverage warnings
+if not channels.empty:
+    present_cids = set(videos["channel_id"].dropna().unique()) if not videos.empty else set()
+    zero_video_chans = [r.channel_name for r in channels.itertuples() if r.channel_id not in present_cids]
+    if zero_video_chans:
+        st.warning(f"⚠️ {len(zero_video_chans)} tracked channel(s) currently have no collected videos: {', '.join(zero_video_chans)}. Use 'Run Full Analysis' in System Health to ingest.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -394,6 +423,13 @@ with tab_overview:
             )
         else:
             empty_state("No video records match the current filters.")
+
+    with st.expander("🎯 View Per-Channel Coverage Ledger (Targets vs. Collected)", expanded=False):
+        try:
+            cov_summary_df = channel_manager.get_channel_run_coverage_df()
+            st.dataframe(cov_summary_df, width="stretch", hide_index=True)
+        except Exception:
+            pass
 
 # ===================== SENTIMENT INTELLIGENCE =====================
 with tab_sentiment:
@@ -1100,9 +1136,9 @@ with tab_system:
                     )
                     target_cids_list = tracked_df[tracked_df["channel_name"].isin(sel_chans)]["channel_id"].tolist()
             with p_c2:
-                v_limit = st.number_input("Max Videos / Channel", min_value=1, max_value=20, value=5, step=1, key="v_limit_in")
+                v_limit = st.number_input("Max Videos / Channel", min_value=1, max_value=50, value=10, step=1, key="v_limit_in")
             with p_c3:
-                s_limit = st.number_input("Max RoBERTa Comments", min_value=10, max_value=500, value=150, step=50, key="s_limit_in")
+                s_limit = st.number_input("Max RoBERTa Comments", min_value=50, max_value=2000, value=800, step=50, key="s_limit_in")
 
             btn_run_analysis = st.button("🚀 Run Full Analysis", type="primary", width="stretch", key="btn_run_full_analysis")
 
@@ -1117,6 +1153,8 @@ with tab_system:
                             ref=branch_ref,
                             channel_ids=target_cids_list,
                             video_limit=v_limit,
+                            comments_per_video=100,
+                            transcripts_per_channel=2,
                             sentiment_limit=s_limit,
                             run_whisper=True,
                             force=False,
@@ -1180,10 +1218,19 @@ with tab_system:
                 st.caption("ℹ️ Configure `GITHUB_TOKEN` in Streamlit Secrets to view live GitHub Actions run status and job stages.")
 
             # -----------------------------------------------------------
-            # Section 4: Channel Ingestion Status Table & Refresh
+            # Section 4: Channel Ingestion Status & Coverage Table
             # -----------------------------------------------------------
             st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("##### 📊 Channel Telemetry & Storage State")
+            st.markdown("##### 🎯 Per-Channel Ingestion & Transcription Coverage Ledger")
+            st.caption("Detailed breakdown of targets vs collected videos, comments, and transcripts for all tracked competitors.")
+            try:
+                coverage_df = channel_manager.get_channel_run_coverage_df()
+                st.dataframe(coverage_df, width="stretch", hide_index=True)
+            except Exception as exc:
+                st.error(f"Could not load channel coverage ledger: {type(exc).__name__}")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### 📊 All-Time Channel Telemetry & Storage State")
             try:
                 telemetry_df = channel_manager.get_channel_telemetry_df()
                 st.dataframe(telemetry_df, width="stretch", hide_index=True)
