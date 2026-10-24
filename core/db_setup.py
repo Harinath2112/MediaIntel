@@ -233,6 +233,8 @@ def ensure_schema(verbose: bool = True) -> list[str]:
 
 def sync_channels() -> list[dict]:
     """Applies target_channels.json to the `channels` table. Adds / renames / (un)tracks, never deletes."""
+    if config.env("MEDIAINTEL_CHANNEL_SOURCE", "").lower() == "database":
+        return []
     path = config.CHANNELS_FILE
     if not path.exists():
         return []

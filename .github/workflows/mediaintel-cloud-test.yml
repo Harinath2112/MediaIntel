@@ -110,6 +110,7 @@ jobs:
         env:
           MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          MEDIAINTEL_CHANNEL_SOURCE: database
           MEDIAINTEL_INGEST_CHANNEL_ID: UCBwmMxybNva6P_5VmxjzwqA
           MEDIAINTEL_INGEST_VIDEO_LIMIT: '2'
           COMMENT_PAGES: '1'
