@@ -42,10 +42,10 @@ on:
         type: string
         default: '2'
       sentiment_limit:
-        description: 'Max unanalysed comments to process with RoBERTa'
+        description: 'Max unanalysed comments to process with RoBERTa (0 for all pending up to safe time budget)'
         required: false
         type: string
-        default: '800'
+        default: '0'
 
 permissions:
   contents: read
@@ -137,15 +137,20 @@ jobs:
         env:
           MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
           INPUT_SENTIMENT_LIMIT: ${{ inputs.sentiment_limit }}
+          MAX_COMMENTS_PER_VIDEO: '0'
           SENTIMENT_BATCH: '8'
-          NLP_CHUNK: '50'
+          NLP_CHUNK: '200'
           QUANTIZE: '0'
           OMP_NUM_THREADS: '2'
           MKL_NUM_THREADS: '2'
           TOKENIZERS_PARALLELISM: 'false'
         run: |
-          LIMIT="${INPUT_SENTIMENT_LIMIT:-800}"
-          python -m core.nlp_pipeline --limit "$LIMIT"
+          LIMIT="${INPUT_SENTIMENT_LIMIT:-0}"
+          if [ "$LIMIT" = "0" ] || [ -z "$LIMIT" ]; then
+            python -m core.nlp_pipeline --time-budget 24
+          else
+            python -m core.nlp_pipeline --limit "$LIMIT" --time-budget 24
+          fi
 
       - name: Compute relevance and next-video topic suggestions
         env:

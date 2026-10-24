@@ -545,7 +545,7 @@ def dispatch_cloud_pipeline(
     video_limit: int = 10,
     comments_per_video: int = 100,
     transcripts_per_channel: int = 2,
-    sentiment_limit: int = 800,
+    sentiment_limit: int = 0,
     run_whisper: bool = True,
     force: bool = False,
 ) -> dict[str, Any]:

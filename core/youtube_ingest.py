@@ -213,13 +213,17 @@ def ingest_competitor_data() -> None:
         100
     )
 
-    # Pre-execution Quota Estimation
-    est_units = len(channels) * (1 + 1 + 1 + video_limit)
+    # Pre-execution Quota Estimation accounting for pagination and retries
+    comment_pages = max(1, (comments_per_video + 99) // 100)
+    base_units = len(channels) * (1 + 1 + 1 + (video_limit * comment_pages))
+    # Standard 15% safety buffer for network retries and edge pagination
+    buffered_units = int(base_units * 1.15)
     print(f"\nYouTube Data API Quota Calculation:")
     print(f"  Target Channels: {len(channels)}")
     print(f"  Max Videos / Channel: {video_limit}")
-    print(f"  Max Top-Level Comments / Video: {comments_per_video}")
-    print(f"  Estimated API Quota: ~{est_units} units ({est_units / 10000 * 100:.2f}% of 10,000 daily free-tier limit)")
+    print(f"  Max Top-Level Comments / Video: {comments_per_video} ({comment_pages} page(s)/video)")
+    print(f"  Base API Quota: ~{base_units} units")
+    print(f"  Estimated API Quota (with 15% retry & pagination safety buffer): ~{buffered_units} units ({buffered_units / 10000 * 100:.2f}% of 10,000 daily free-tier limit)")
 
     now = config.utcnow()
     upsert_video = config.upsert_sql("videos", VIDEO_COLS, ["video_id"],
@@ -266,7 +270,7 @@ def ingest_competitor_data() -> None:
 
             # comments of every video of this channel, in parallel
             with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-                futures = {pool.submit(client.top_comments, r["video_id"], COMMENT_PAGES): r["video_id"]
+                futures = {pool.submit(client.top_comments, r["video_id"], comment_pages, comments_per_video): r["video_id"]
                            for r in rows if r["comment_count"] > 0}
                 for fut in as_completed(futures):
                     vid = futures[fut]

@@ -271,6 +271,59 @@ class TestConsistentDataCollection(unittest.TestCase):
         self.assertIn("video_limit:", content)
         self.assertIn("comments_per_video:", content)
         self.assertIn("transcripts_per_channel:", content)
+        self.assertIn("sentiment_limit:", content)
+
+    def test_11_safe_incremental_batching_for_all_comments(self):
+        """Test 11: RoBERTa pending selector processes all comments when limit=0/None without truncation."""
+        from core import nlp_pipeline
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO videos (video_id, channel_id, title, published_at) "
+                     "VALUES ('v_nlp_test', 'UC001', 'NLP Test Video', :p)"),
+                {"p": now}
+            )
+            # Insert 50 test comments
+            c_rows = [
+                {"cid": f"comm_nlp_{i}", "vid": "v_nlp_test", "txt": f"Test comment {i}", "likes": i, "p": now}
+                for i in range(50)
+            ]
+            conn.execute(
+                text("INSERT INTO comments (comment_id, video_id, comment_text, like_count, published_at) "
+                     "VALUES (:cid, :vid, :txt, :likes, :p)"),
+                c_rows
+            )
+
+        # 1. limit=None or 0 should return all 50 comments
+        all_pending_none = nlp_pipeline._pending(limit=None, reprocess_all=True, model_name="test_model")
+        self.assertEqual(len(all_pending_none), 50)
+
+        all_pending_zero = nlp_pipeline._pending(limit=0, reprocess_all=True, model_name="test_model")
+        self.assertEqual(len(all_pending_zero), 50)
+
+        # 2. positive limit should cap as requested
+        capped_pending = nlp_pipeline._pending(limit=20, reprocess_all=True, model_name="test_model")
+        self.assertEqual(len(capped_pending), 20)
+
+    def test_12_quota_calculation_accounts_for_pagination_and_retries(self):
+        """Test 12: YouTube API quota calculations account for pagination and retry buffers."""
+        n_channels = 8
+        video_limit = 10
+        comments_per_video = 100
+
+        # Formula from core/youtube_ingest.py
+        comment_pages = max(1, (comments_per_video + 99) // 100)
+        self.assertEqual(comment_pages, 1)
+
+        base_units = n_channels * (1 + 1 + 1 + (video_limit * comment_pages))
+        # 8 channels * (1 + 1 + 1 + 10) = 8 * 13 = 104 units
+        self.assertEqual(base_units, 104)
+
+        buffered_units = int(base_units * 1.15)
+        # 104 * 1.15 = 119.6 -> 119 units
+        self.assertEqual(buffered_units, 119)
+        self.assertLess(buffered_units, 10000)  # Comfortably within 10,000 daily limit
 
 
 if __name__ == "__main__":

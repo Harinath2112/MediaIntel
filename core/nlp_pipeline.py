@@ -30,7 +30,7 @@ from core import aspects as asp  # noqa: E402
 from core import nlp_models  # noqa: E402
 from sqlalchemy import bindparam, text  # noqa: E402
 
-CHUNK = config.env_int("NLP_CHUNK", 800)    # comments per database commit
+CHUNK = config.env_int("NLP_CHUNK", 200)    # comments per database commit
 MAX_PER_VIDEO = config.setting_int("MAX_COMMENTS_PER_VIDEO")   # 0 = analyse all collected comments; N = most-liked N per video
 
 
@@ -108,7 +108,9 @@ def _pending(limit: int | None, reprocess_all: bool, model_name: str):
     if not reprocess_all:
         df = df[df["model_name"].isna() | (df["model_name"] != model_name)]
     df = df.drop_duplicates("comment_id").sort_values("comment_id")
-    return df.head(int(limit)) if limit else df
+    if limit is not None and int(limit) > 0:
+        return df.head(int(limit))
+    return df
 
 
 def _write_chunk(ids: list[str], results: list[dict], model_name: str) -> None:
@@ -133,7 +135,12 @@ def _write_chunk(ids: list[str], results: list[dict], model_name: str) -> None:
                      .bindparams(bindparam("ids", expanding=True)), {"ids": ids})
 
 
-def run_ai_pipeline(limit: int | None = None, reprocess_all: bool = False, preview: int = 0) -> int:
+def run_ai_pipeline(
+    limit: int | None = None,
+    reprocess_all: bool = False,
+    preview: int = 0,
+    time_budget_min: float | None = None,
+) -> int:
     sentiment = nlp_models.get_sentiment_model()
     model_name = getattr(sentiment, "name", nlp_models.SENTIMENT_MODEL)
 
@@ -144,7 +151,7 @@ def run_ai_pipeline(limit: int | None = None, reprocess_all: bool = False, previ
         return 0
 
     matcher = asp.AspectMatcher(nlp_models.get_embedder())
-    print(f"{len(df)} comment(s) to analyse with {model_name}.")
+    print(f"{len(df)} comment(s) queued for RoBERTa/ABSA analysis ({model_name}).")
 
     if preview:
         sample = df.sample(min(preview, len(df)), random_state=1)
@@ -156,8 +163,21 @@ def run_ai_pipeline(limit: int | None = None, reprocess_all: bool = False, previ
                 print(f"     - {a['aspect']:<16} {a['sentiment_label']:<8} polarity {a['polarity']:+.2f}   <- \"{a['evidence'][:60]}\"")
         return len(sample)
 
+    budget_minutes = (
+        time_budget_min
+        if time_budget_min is not None
+        else config.env_float("NLP_TIME_BUDGET_MIN", 24.0)
+    )
+    time_budget_sec = budget_minutes * 60.0 if budget_minutes and budget_minutes > 0 else 0.0
+
     done, started = 0, time.time()
     for start in range(0, len(df), CHUNK):
+        elapsed = time.time() - started
+        if time_budget_sec > 0 and elapsed >= time_budget_sec and done > 0:
+            print(f"\n⚠️ Safe time budget reached ({elapsed / 60.0:.1f}m / {budget_minutes:.1f}m). "
+                  f"Processed and committed {done}/{len(df)} comments. Remaining {len(df) - done} comments will be processed in the next run.")
+            break
+
         chunk = df.iloc[start:start + CHUNK]
         results = analyse_comments(chunk["comment_text"].astype(str).tolist(), sentiment, matcher)
         _write_chunk(chunk["comment_id"].tolist(), results, model_name)
@@ -170,9 +190,12 @@ def run_ai_pipeline(limit: int | None = None, reprocess_all: bool = False, previ
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="maximum comments to analyze (0 or omitted = all pending)")
+    ap.add_argument("--time-budget", type=float, default=None,
+                    help="maximum minutes to spend before graceful incremental exit (default: 24m)")
     ap.add_argument("--reprocess-all", action="store_true", help="re-run every comment, even if already analysed")
     ap.add_argument("--preview", type=int, default=0, metavar="N",
                     help="show predictions for N random comments without saving (sanity check)")
     a = ap.parse_args()
-    run_ai_pipeline(a.limit, a.reprocess_all, a.preview)
+    run_ai_pipeline(a.limit, a.reprocess_all, a.preview, time_budget_min=a.time_budget)

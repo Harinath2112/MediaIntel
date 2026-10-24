@@ -1138,7 +1138,15 @@ with tab_system:
             with p_c2:
                 v_limit = st.number_input("Max Videos / Channel", min_value=1, max_value=50, value=10, step=1, key="v_limit_in")
             with p_c3:
-                s_limit = st.number_input("Max RoBERTa Comments", min_value=50, max_value=2000, value=800, step=50, key="s_limit_in")
+                s_limit = st.number_input(
+                    "Max RoBERTa Comments (0 for All)",
+                    min_value=0,
+                    max_value=8000,
+                    value=0,
+                    step=500,
+                    key="s_limit_in",
+                    help="0 analyzes all pending comments incrementally across all channels without truncation."
+                )
 
             btn_run_analysis = st.button("🚀 Run Full Analysis", type="primary", width="stretch", key="btn_run_full_analysis")
 
