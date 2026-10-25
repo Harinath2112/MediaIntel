@@ -122,7 +122,7 @@ def verify_video_upload_eligibility(video_id: str) -> None:
         raise ValueError("Invalid YouTube video ID.")
 
     engine = get_engine()
-    if engine.dialect.name != "postgresql":
+    if engine.dialect.name not in ("postgresql", "sqlite"):
         raise RuntimeError("Cloud audio uploads require PostgreSQL.")
 
     with engine.connect() as conn:
@@ -174,7 +174,7 @@ def create_audio_mapping(video_id: str, object_path: str) -> None:
         raise ValueError("Invalid audio object path.")
 
     engine = get_engine()
-    if engine.dialect.name != "postgresql":
+    if engine.dialect.name not in ("postgresql", "sqlite"):
         raise RuntimeError("Cloud audio mappings require PostgreSQL.")
 
     with engine.begin() as conn:

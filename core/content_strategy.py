@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import pandas as pd  # noqa: E402
 from core import config  # noqa: E402
 from core import insights  # noqa: E402
 
@@ -27,7 +28,16 @@ def generate_strategic_insights() -> None:
 
     topics = d["topics"][d["topics"]["scope"] == "ALL"]
     if not topics.empty:
-        lines += ["", "TOPICS FOR YOUR NEXT VIDEO (from Whisper transcripts + comments)"]
+        tx = d.get("transcripts", pd.DataFrame())
+        whisper_cnt = int((tx["source"] == "whisper").sum()) if not tx.empty else 0
+        captions_cnt = int((tx["source"] == "captions").sum()) if not tx.empty else 0
+        if whisper_cnt > 0:
+            src_label = "from Whisper transcripts + comments"
+        elif captions_cnt > 0:
+            src_label = "from YouTube captions + comments"
+        else:
+            src_label = "from video titles + comments"
+        lines += ["", f"TOPICS FOR YOUR NEXT VIDEO ({src_label})"]
         for t in topics.head(5).itertuples(index=False):
             lines.append(f"{t.rank_no}. {t.topic}  (score {t.score:.0f})")
             lines.append(f"    {t.evidence}")
@@ -37,7 +47,11 @@ def generate_strategic_insights() -> None:
         lines.append(f"{n}. {head}\n   {body}")
 
     text_out = "\n".join(lines)
-    print(text_out)
+    try:
+        print(text_out)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        print(text_out.encode(enc, errors="replace").decode(enc, errors="replace"))
     REPORT_PATH.write_text(text_out, encoding="utf-8")
     print(f"\nStrategy report saved to 'outputs/{REPORT_PATH.name}'.")
 

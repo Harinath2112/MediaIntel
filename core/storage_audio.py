@@ -257,22 +257,23 @@ def complete_audio_transcription(
 
     engine = config.get_engine()
 
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError("Cloud completion requires PostgreSQL")
+    if engine.dialect.name not in ("postgresql", "sqlite"):
+        raise RuntimeError("Cloud completion requires PostgreSQL or SQLite")
 
     video_id = video_id.strip()
     claim_token = claim_token.strip()
 
     with engine.begin() as connection:
+        lock_clause = "FOR UPDATE" if engine.dialect.name == "postgresql" else ""
         mapping = connection.execute(
-            text("""
+            text(f"""
                 SELECT video_id
                 FROM video_audio_assets
                 WHERE video_id = :video_id
                   AND status = 'processing'
                   AND claim_token = :claim_token
-                  AND lease_expires_at > CURRENT_TIMESTAMP
-                FOR UPDATE
+                  AND (lease_expires_at > CURRENT_TIMESTAMP OR lease_expires_at IS NULL)
+                {lock_clause}
             """),
             {
                 "video_id": video_id,
@@ -284,11 +285,11 @@ def complete_audio_transcription(
             return False
 
         existing = connection.execute(
-            text("""
+            text(f"""
                 SELECT source
                 FROM transcripts
                 WHERE video_id = :video_id
-                FOR UPDATE
+                {lock_clause}
             """),
             {"video_id": video_id},
         ).first()
@@ -361,61 +362,103 @@ def claim_audio_mapping(
 
     engine = config.get_engine()
 
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError("Cloud audio claiming requires PostgreSQL")
+    if engine.dialect.name not in ("postgresql", "sqlite"):
+        raise RuntimeError("Cloud audio claiming requires PostgreSQL or SQLite")
 
     token = uuid.uuid4().hex
 
-    statement = text("""
-        WITH eligible AS (
-            SELECT a.video_id
-            FROM video_audio_assets a
-            JOIN videos v ON v.video_id = a.video_id
-            JOIN channels c ON c.channel_id = v.channel_id
-            LEFT JOIN transcripts t ON t.video_id = a.video_id
-            WHERE a.video_id = :video_id
-              AND c.is_tracked = TRUE
-              AND a.attempts < 3
-              AND (
-                  a.status IN ('pending', 'failed')
-                  OR (
-                      a.status = 'processing'
-                      AND a.lease_expires_at < CURRENT_TIMESTAMP
+    if engine.dialect.name == "postgresql":
+        statement = text("""
+            WITH eligible AS (
+                SELECT a.video_id
+                FROM video_audio_assets a
+                JOIN videos v ON v.video_id = a.video_id
+                JOIN channels c ON c.channel_id = v.channel_id
+                LEFT JOIN transcripts t ON t.video_id = a.video_id
+                WHERE a.video_id = :video_id
+                  AND c.is_tracked = TRUE
+                  AND a.attempts < 3
+                  AND (
+                      a.status IN ('pending', 'failed')
+                      OR (
+                          a.status = 'processing'
+                          AND a.lease_expires_at < CURRENT_TIMESTAMP
+                      )
                   )
-              )
-              AND (
-                  t.video_id IS NULL
-                  OR t.source IN ('captions', 'failed')
-              )
-            FOR UPDATE OF a SKIP LOCKED
-        )
-        UPDATE video_audio_assets a
-            SET status = 'processing',
-            attempts = a.attempts + 1,
-            claim_token = :token,
-            claimed_at = CURRENT_TIMESTAMP,
-            lease_expires_at =
-                CURRENT_TIMESTAMP
-                + (:lease_minutes * INTERVAL '1 minute'),
-            last_error = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        FROM eligible
-        WHERE a.video_id = eligible.video_id
-        RETURNING a.video_id, a.bucket, a.object_path,
-                  a.claim_token
-    """)
-
-    with engine.begin() as connection:
-        row = connection.execute(
-            statement,
-            {
+                  AND (
+                      t.video_id IS NULL
+                      OR t.source IN ('captions', 'failed')
+                  )
+                FOR UPDATE OF a SKIP LOCKED
+            )
+            UPDATE video_audio_assets a
+                SET status = 'processing',
+                attempts = a.attempts + 1,
+                claim_token = :token,
+                claimed_at = CURRENT_TIMESTAMP,
+                lease_expires_at =
+                    CURRENT_TIMESTAMP
+                    + (:lease_minutes * INTERVAL '1 minute'),
+                last_error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            FROM eligible
+            WHERE a.video_id = eligible.video_id
+            RETURNING a.video_id, a.bucket, a.object_path,
+                      a.claim_token
+        """)
+        with engine.begin() as connection:
+            row = connection.execute(
+                statement,
+                {
+                    "video_id": video_id.strip(),
+                    "token": token,
+                    "lease_minutes": lease_minutes,
+                },
+            ).mappings().first()
+        return dict(row) if row else None
+    else:
+        with engine.begin() as connection:
+            sel_stmt = text("""
+                SELECT a.video_id, a.bucket, a.object_path
+                FROM video_audio_assets a
+                JOIN videos v ON v.video_id = a.video_id
+                JOIN channels c ON c.channel_id = v.channel_id
+                LEFT JOIN transcripts t ON t.video_id = a.video_id
+                WHERE a.video_id = :video_id
+                  AND c.is_tracked IN (1, TRUE)
+                  AND a.attempts < 3
+                  AND (
+                      a.status IN ('pending', 'failed')
+                      OR (
+                          a.status = 'processing'
+                          AND a.lease_expires_at < CURRENT_TIMESTAMP
+                      )
+                  )
+                  AND (
+                      t.video_id IS NULL
+                      OR t.source IN ('captions', 'failed')
+                  )
+            """)
+            row = connection.execute(sel_stmt, {"video_id": video_id.strip()}).mappings().first()
+            if not row:
+                return None
+            upd_stmt = text("""
+                UPDATE video_audio_assets
+                SET status = 'processing',
+                    attempts = attempts + 1,
+                    claim_token = :token,
+                    claimed_at = CURRENT_TIMESTAMP,
+                    lease_expires_at = datetime('now', '+' || :lease_minutes || ' minute'),
+                    last_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE video_id = :video_id
+            """)
+            connection.execute(upd_stmt, {
                 "video_id": video_id.strip(),
                 "token": token,
                 "lease_minutes": lease_minutes,
-            },
-        ).mappings().first()
-
-    return dict(row) if row else None
+            })
+            return {"video_id": row["video_id"], "bucket": row["bucket"], "object_path": row["object_path"], "claim_token": token}
 
 def fail_audio_claim(
     video_id: str,
@@ -437,8 +480,8 @@ def fail_audio_claim(
 
     engine = config.get_engine()
 
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError("Cloud failure handling requires PostgreSQL")
+    if engine.dialect.name not in ("postgresql", "sqlite"):
+        raise RuntimeError("Cloud failure handling requires PostgreSQL or SQLite")
 
     statement = text("""
         UPDATE video_audio_assets
@@ -451,7 +494,7 @@ def fail_audio_claim(
         WHERE video_id = :video_id
           AND status = 'processing'
           AND claim_token = :claim_token
-          AND lease_expires_at > CURRENT_TIMESTAMP
+          AND (lease_expires_at > CURRENT_TIMESTAMP OR lease_expires_at IS NULL)
     """)
 
     with engine.begin() as connection:
@@ -489,21 +532,32 @@ def renew_audio_claim(
 
     engine = config.get_engine()
 
-    if engine.dialect.name != "postgresql":
-        raise RuntimeError("Cloud lease renewal requires PostgreSQL")
+    if engine.dialect.name not in ("postgresql", "sqlite"):
+        raise RuntimeError("Cloud lease renewal requires PostgreSQL or SQLite")
 
-    statement = text("""
-        UPDATE video_audio_assets
-        SET lease_expires_at = GREATEST(
-                lease_expires_at,
-                CURRENT_TIMESTAMP
-            ) + (:lease_minutes * INTERVAL '1 minute'),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE video_id = :video_id
-          AND status = 'processing'
-          AND claim_token = :claim_token
-          AND lease_expires_at > CURRENT_TIMESTAMP
-    """)
+    if engine.dialect.name == "postgresql":
+        statement = text("""
+            UPDATE video_audio_assets
+            SET lease_expires_at = GREATEST(
+                    lease_expires_at,
+                    CURRENT_TIMESTAMP
+                ) + (:lease_minutes * INTERVAL '1 minute'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE video_id = :video_id
+              AND status = 'processing'
+              AND claim_token = :claim_token
+              AND lease_expires_at > CURRENT_TIMESTAMP
+        """)
+    else:
+        statement = text("""
+            UPDATE video_audio_assets
+            SET lease_expires_at = datetime('now', '+' || :lease_minutes || ' minute'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE video_id = :video_id
+              AND status = 'processing'
+              AND claim_token = :claim_token
+              AND (lease_expires_at > CURRENT_TIMESTAMP OR lease_expires_at IS NULL)
+        """)
 
     with engine.begin() as connection:
         result = connection.execute(

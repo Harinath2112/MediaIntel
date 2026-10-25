@@ -491,10 +491,12 @@ def main() -> int:
                 sep="\n  - ",
             )
 
-            print(
-                "\n--- last orchestrator output ---\n"
-                + r2.stdout[-1500:]
-            )
+            out_snippet = r2.stdout[-1500:]
+            try:
+                print("\n--- last orchestrator output ---\n" + out_snippet)
+            except UnicodeEncodeError:
+                enc = sys.stdout.encoding or "utf-8"
+                print("\n--- last orchestrator output ---\n" + out_snippet.encode(enc, errors="replace").decode(enc, errors="replace"))
 
         return 1 if failed else 0
 

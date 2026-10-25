@@ -113,10 +113,62 @@ jobs:
           export MEDIAINTEL_INGEST_COMMENTS_PER_VIDEO="$COMMENTS_LIMIT"
           python -m core.youtube_ingest
 
+  whisper-transcription:
+    name: Cloud Whisper Transcription & Caption Processing
+    needs: [ingest-youtube]
+    if: always() && (inputs.run_whisper == true || inputs.run_whisper == 'true') && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-whisper.txt
+
+      - name: Install FFmpeg and Whisper dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-whisper.txt
+
+      - name: Verify Supabase and database configuration
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          python -m core.config || { echo "Database connectivity preflight failed"; exit 1; }
+          echo "Storage and database configuration verified."
+
+      - name: Acquire audio and transcribe via Faster-Whisper / Captions
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          INPUT_TRANSCRIPTS_PER_CHANNEL: ${{ inputs.transcripts_per_channel }}
+          WHISPER_MODEL: tiny
+          WHISPER_COMPUTE: int8
+          OMP_NUM_THREADS: '2'
+        run: |
+          TRANS_LIMIT="${INPUT_TRANSCRIPTS_PER_CHANNEL:-2}"
+          python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 600
+
   ai-analytics:
     name: Cloud AI & Analytics Pipeline
-    needs: [ingest-youtube]
-    if: always() && (inputs.run_ai == true || inputs.run_ai == 'true') && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
+    needs: [ingest-youtube, whisper-transcription]
+    if: |
+      always() &&
+      (inputs.run_ai == true || inputs.run_ai == 'true') &&
+      (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped') &&
+      (needs.whisper-transcription.result == 'success' || needs.whisper-transcription.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -136,11 +188,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-ai.txt
 
-      - name: Verify database secret
+      - name: Verify database preflight
         env:
           MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
         run: |
           test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          python -m core.config || { echo "Database preflight failed"; exit 1; }
           echo "Database configuration verified for AI stages."
 
       - name: Run RoBERTa sentiment and ABSA analysis
@@ -174,64 +227,15 @@ jobs:
         run: |
           python -m core.anomaly_alert
 
-  whisper-transcription:
-    name: Cloud Whisper Transcription
-    needs: [ingest-youtube]
-    if: always() && (inputs.run_whisper == true || inputs.run_whisper == 'true') && (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements-whisper.txt
-
-      - name: Install FFmpeg and Whisper dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-whisper.txt
-
-      - name: Verify Supabase configuration
-        env:
-          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: |
-          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
-          test -n "$SUPABASE_URL" || { echo "Missing SUPABASE_URL"; exit 1; }
-          test -n "$SUPABASE_SECRET_KEY" || { echo "Missing SUPABASE_SECRET_KEY"; exit 1; }
-          echo "Storage and database configuration verified."
-
-      - name: Process pending audio assets via Faster-Whisper
-        env:
-          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          INPUT_TRANSCRIPTS_PER_CHANNEL: ${{ inputs.transcripts_per_channel }}
-          WHISPER_MODEL: tiny
-          WHISPER_COMPUTE: int8
-          OMP_NUM_THREADS: '2'
-        run: |
-          TRANS_LIMIT="${INPUT_TRANSCRIPTS_PER_CHANNEL:-2}"
-          python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 600
-
   rpa-reporting:
     name: Cloud RPA & Intelligence Reporting
-    needs: [ingest-youtube, ai-analytics, whisper-transcription]
+    needs: [ingest-youtube, whisper-transcription, ai-analytics]
     if: |
       always() &&
       (inputs.run_rpa == true || inputs.run_rpa == 'true') &&
       (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped') &&
-      (needs.ai-analytics.result == 'success' || needs.ai-analytics.result == 'skipped') &&
-      (needs.whisper-transcription.result == 'success' || needs.whisper-transcription.result == 'skipped')
+      (needs.whisper-transcription.result == 'success' || needs.whisper-transcription.result == 'skipped') &&
+      (needs.ai-analytics.result == 'success' || needs.ai-analytics.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 

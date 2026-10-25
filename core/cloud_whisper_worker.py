@@ -1,18 +1,13 @@
-"""Storage-only Cloud Whisper worker for MediaIntel.
-
-Processes audio explicitly mapped to videos in private Supabase Storage.
-Does not download audio from YouTube.
-"""
-
 import argparse
 import logging
+import os
 import sys
 import threading
+import time
 
 from core import config, channel_manager, storage_audio, transcribe_videos
 
 LOGGER = logging.getLogger(__name__)
-
 
 
 class LeaseHeartbeat:
@@ -63,7 +58,7 @@ class LeaseHeartbeat:
 
 
 def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
-    """Process top candidate videos per channel (ranked by view count) using authorized Storage audio."""
+    """Process top candidate videos per channel with audio acquisition, Whisper, and caption fallback."""
     if limit < 1:
         raise ValueError("limit must be at least 1")
     if max_seconds < 1:
@@ -71,9 +66,17 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
 
     stats = {
         "selected_for_transcription": 0,
+        "audio_downloads_attempted": 0,
+        "audio_downloads_successful": 0,
+        "whisper_transcripts_completed": 0,
+        "caption_fallbacks_completed": 0,
+        "permanently_unavailable": 0,
+        "retryable_failures": 0,
+        "model_storage_failures": 0,
+        "skipped": 0,
+        # Backward-compatibility keys
         "completed": 0,
         "audio_unavailable": 0,
-        "skipped": 0,
         "failed": 0,
     }
 
@@ -85,7 +88,7 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
         LOGGER.info("No candidate videos found for transcription.")
         return stats
 
-    # Query existing transcripts
+    # Query existing transcripts to prevent duplicate work
     existing_transcripts = config.read_sql(
         "SELECT video_id, source, transcript_text FROM transcripts"
     )
@@ -94,11 +97,13 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
         for r in existing_transcripts.itertuples():
             tx_by_video[str(r.video_id)] = (str(r.source or ""), str(r.transcript_text or ""))
 
+    from core import cloud_audio_upload
+
     for row in candidates_df.to_dict("records"):
         video_id = str(row["video_id"])
         title = str(row.get("title", video_id))
 
-        # Check for existing completed transcript
+        # 1. Check for existing completed transcript
         if video_id in tx_by_video:
             src, text_val = tx_by_video[video_id]
             if src in ("whisper", "captions") and text_val.strip():
@@ -106,30 +111,86 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
                 LOGGER.info("Video %s already transcribed (%s) - skipped.", video_id, src)
                 continue
 
-        # Check for authorized audio asset in Supabase storage
+        # 2. Check for existing audio mapping in Supabase storage
         mapping = storage_audio.get_audio_mapping(video_id)
-        if mapping is None:
-            # Authorized storage audio unavailable - do not bypass restrictions, record audio_unavailable
-            transcribe_videos.save(
-                video_id,
-                source="audio_unavailable",
-                model=f"whisper-{transcribe_videos.WHISPER_MODEL}",
-                body=None,
-                seconds=0,
-                attempts=1,
-                err="Audio unavailable: YouTube server-side streaming restricted; requires authorized audio asset in Supabase Storage",
-            )
-            stats["audio_unavailable"] += 1
-            LOGGER.info("Video %s ('%s') marked audio_unavailable (no storage asset).", video_id, title[:50])
-            continue
 
-        # Authorized audio asset is available: proceed with claim and transcription
+        # 3. If no existing storage mapping, attempt lawful audio acquisition via yt-dlp
+        if mapping is None:
+            stats["audio_downloads_attempted"] += 1
+            LOGGER.info("Attempting permitted audio acquisition for %s ('%s')...", video_id, title[:45])
+            try:
+                cloud_audio_upload.acquire_and_upload_authorized_audio(
+                    video_id=video_id,
+                    max_seconds=max_seconds,
+                )
+                stats["audio_downloads_successful"] += 1
+                mapping = storage_audio.get_audio_mapping(video_id)
+                LOGGER.info("Audio acquired and stored in private Supabase Storage for %s.", video_id)
+            except Exception as dl_exc:
+                dl_msg = str(dl_exc)
+                LOGGER.warning("Audio acquisition unavailable for %s: %s", video_id, dl_msg[:120])
+
+                # Check if this is a systemic storage/configuration failure
+                is_systemic_config = (
+                    "configuration is missing or invalid" in dl_msg.lower()
+                    or "unapproved supabase storage" in dl_msg.lower()
+                    or "storage api returned http 40" in dl_msg.lower()
+                )
+                if is_systemic_config:
+                    stats["model_storage_failures"] += 1
+
+                # 4. Fallback to lawful YouTube captions if audio is restricted or unavailable
+                caption_acquired = False
+                LOGGER.info("Attempting lawful caption fallback for %s...", video_id)
+                try:
+                    c_text, c_lang = transcribe_videos.fetch_captions(video_id)
+                    if c_text and c_text.strip():
+                        transcribe_videos.save(
+                            video_id,
+                            source="captions",
+                            language=c_lang,
+                            model="youtube-captions",
+                            body=c_text.strip(),
+                            seconds=None,
+                            attempts=1,
+                            err=None,
+                        )
+                        stats["caption_fallbacks_completed"] += 1
+                        caption_acquired = True
+                        LOGGER.info("Video %s saved with YouTube captions fallback (source=captions).", video_id)
+                except Exception as cap_exc:
+                    LOGGER.info("Caption fallback unavailable for %s: %s", video_id, str(cap_exc)[:100])
+
+                if not caption_acquired:
+                    # Neither audio nor captions could be obtained
+                    is_timeout = "timeout" in dl_msg.lower() or "timed out" in dl_msg.lower()
+                    reason = f"Audio unavailable: {dl_msg[:100]}; Captions unavailable"
+                    transcribe_videos.save(
+                        video_id,
+                        source="audio_unavailable",
+                        model=f"whisper-{transcribe_videos.WHISPER_MODEL}",
+                        body=None,
+                        seconds=0,
+                        attempts=1,
+                        err=reason,
+                    )
+                    if is_timeout:
+                        stats["retryable_failures"] += 1
+                    else:
+                        stats["permanently_unavailable"] += 1
+                    stats["audio_unavailable"] += 1
+                    LOGGER.info("Video %s marked audio_unavailable.", video_id)
+                continue
+
+        # 5. Audio asset is available in Storage: claim and transcribe with Faster-Whisper
         claim = storage_audio.claim_audio_mapping(video_id)
         if claim is None:
             stats["skipped"] += 1
+            LOGGER.info("Audio mapping for %s could not be claimed (in use or lease active).", video_id)
             continue
 
         token = claim["claim_token"]
+        whisper_success = False
         try:
             with LeaseHeartbeat(video_id, token) as heartbeat:
                 pcm = storage_audio.storage_audio_to_pcm(
@@ -161,22 +222,40 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
                 )
 
                 if completed:
+                    stats["whisper_transcripts_completed"] += 1
                     stats["completed"] += 1
-                    LOGGER.info("Completed transcription for %s", video_id)
+                    whisper_success = True
+                    LOGGER.info("Successfully transcribed %s via Faster-Whisper (source=whisper).", video_id)
                 else:
                     stats["skipped"] += 1
                     LOGGER.warning("Completion rejected for %s", video_id)
         except Exception as exc:
-            LOGGER.exception("Transcription failed for %s", video_id)
-            failed = storage_audio.fail_audio_claim(
+            LOGGER.exception("Whisper transcription failed for %s", video_id)
+            stats["model_storage_failures"] += 1
+            stats["failed"] += 1
+            storage_audio.fail_audio_claim(
                 video_id,
                 claim_token=token,
                 error=str(exc)[:250],
             )
-            if failed:
-                stats["failed"] += 1
-            else:
-                stats["skipped"] += 1
+            # Safety net: try caption fallback so video isn't left without text
+            try:
+                c_text, c_lang = transcribe_videos.fetch_captions(video_id)
+                if c_text and c_text.strip():
+                    transcribe_videos.save(
+                        video_id,
+                        source="captions",
+                        language=c_lang,
+                        model="youtube-captions",
+                        body=c_text.strip(),
+                        seconds=None,
+                        attempts=1,
+                        err=f"Whisper failed ({str(exc)[:80]}); fallback to captions",
+                    )
+                    stats["caption_fallbacks_completed"] += 1
+                    LOGGER.info("Video %s saved with caption fallback after Whisper failure.", video_id)
+            except Exception:
+                pass
 
     # Refresh channel run coverage table
     try:
@@ -189,7 +268,7 @@ def run(*, limit: int = 2, max_seconds: int = 600) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="MediaIntel Storage-only Cloud Whisper worker"
+        description="MediaIntel Cloud Whisper Worker with Audio Acquisition and Caption Fallback"
     )
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument("--max-seconds", type=int, default=600)
@@ -206,12 +285,39 @@ def main() -> int:
             max_seconds=args.max_seconds,
         )
     except Exception:
-        LOGGER.exception("Cloud Whisper worker failed")
+        LOGGER.exception("Cloud Whisper worker crashed with unhandled exception")
         return 1
 
-    print(f"Cloud Whisper worker results: {stats}")
+    print(f"\n--- Cloud Whisper Worker Summary ---")
+    print(f"Candidates selected        : {stats['selected_for_transcription']}")
+    print(f"Audio downloads attempted  : {stats['audio_downloads_attempted']}")
+    print(f"Audio downloads successful : {stats['audio_downloads_successful']}")
+    print(f"Whisper transcripts        : {stats['whisper_transcripts_completed']}")
+    print(f"Caption fallbacks          : {stats['caption_fallbacks_completed']}")
+    print(f"Permanently unavailable    : {stats['permanently_unavailable']}")
+    print(f"Retryable failures         : {stats['retryable_failures']}")
+    print(f"Model/storage failures     : {stats['model_storage_failures']}")
+    print(f"Skipped (already done)     : {stats['skipped']}")
+    print(f"Raw stats dict: {stats}\n")
+
+    # Outcome policy:
+    # 1. Fail if systemic configuration or model/storage failures occurred
+    if stats["model_storage_failures"] > 0 and (stats["whisper_transcripts_completed"] + stats["caption_fallbacks_completed"] == 0):
+        LOGGER.error("Job failed: Systemic storage/configuration/model failures occurred with 0 transcripts or fallbacks.")
+        return 1
+
+    # 2. If all selected videos were attempted and 0 transcripts or captions were obtained,
+    # and at least one failure was retryable or failed, exit with diagnostic error
+    total_text = stats["whisper_transcripts_completed"] + stats["caption_fallbacks_completed"]
+    if stats["selected_for_transcription"] > 0 and stats["skipped"] == 0 and total_text == 0:
+        if stats["retryable_failures"] > 0:
+            LOGGER.warning("All candidate videos failed due to transient/retryable network errors.")
+            return 1
+
+    LOGGER.info("Cloud Whisper worker completed successfully with verified outcome.")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

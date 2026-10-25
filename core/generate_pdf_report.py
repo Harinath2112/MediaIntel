@@ -51,8 +51,15 @@ def fetch_dashboard_data():
 # HELPERS
 # ---------------------------------------------------------------------------
 def clean_text(value, limit=None):
-    """Drops emoji / non-Latin glyphs the PDF fonts can't draw, optionally truncates."""
-    s = re.sub(r"[^\x20-\x7E\u00A0-\u024F\u2010-\u206F\u20A0-\u20CF]", "", str(value))
+    """Safely normalizes text for PDF rendering, replacing rupee and unsupported glyphs."""
+    s = str(value)
+    # Map Indian Rupee symbol and other currency/math symbols to clean ASCII equivalents
+    s = s.replace("₹", "Rs. ").replace("\u20B9", "Rs. ")
+    s = s.replace("€", "EUR ").replace("£", "GBP ")
+    # Map typographical quotes and dashes to standard ASCII equivalents
+    s = s.replace("–", "-").replace("—", "-").replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    # Filter to printable Latin range supported by ReportLab standard fonts
+    s = re.sub(r"[^\x20-\x7E\u00A0-\u00FF]", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     if limit and len(s) > limit:
         s = s[: limit - 1].rstrip() + "…"
@@ -165,10 +172,24 @@ def chart_top_videos(videos, column, cmap_name, xlabel):
 
 def chart_trend(videos):
     fig, ax = plt.subplots(figsize=HALF)
-    y = videos["view_count"].reset_index(drop=True)
-    ax.plot(y.index, y.values, color="#805ad5", marker="o", markersize=3, linewidth=1.4)
-    ax.fill_between(y.index, y.values, color="#805ad5", alpha=0.08)
-    ax.set_xlabel("Video Index")
+    v_clean = videos.copy()
+    if "published_at" in v_clean.columns and v_clean["published_at"].notna().any():
+        v_clean["pub_dt"] = pd.to_datetime(v_clean["published_at"])
+        v_sorted = v_clean.dropna(subset=["pub_dt"]).sort_values("pub_dt")
+        x_dates = v_sorted["pub_dt"].dt.strftime("%b %d")
+        y = v_sorted["view_count"].values
+        ax.plot(range(len(y)), y, color="#805ad5", marker="o", markersize=3, linewidth=1.4)
+        ax.fill_between(range(len(y)), y, color="#805ad5", alpha=0.08)
+        tick_step = max(1, len(y) // 5)
+        tick_indices = list(range(0, len(y), tick_step))
+        ax.set_xticks(tick_indices)
+        ax.set_xticklabels([x_dates.iloc[i] for i in tick_indices], rotation=25, ha="right", fontsize=6.5)
+        ax.set_xlabel("Publication Date (Chronological)")
+    else:
+        y = v_clean["view_count"].reset_index(drop=True)
+        ax.plot(y.index, y.values, color="#805ad5", marker="o", markersize=3, linewidth=1.4)
+        ax.fill_between(y.index, y.values, color="#805ad5", alpha=0.08)
+        ax.set_xlabel("Video Sequence")
     ax.set_ylabel("Views")
     ax.yaxis.set_major_formatter(FuncFormatter(compact))
     return fig
@@ -465,8 +486,8 @@ def generate_professional_pdf():
             story.append(KeepTogether(cell(
                 title, lambda c=col, m=cmap, l=label: chart_top_videos(videos, c, m, l), note, content_w * 0.97)))
         story.append(pair(
-            cell("11. View Count Distribution Trend", lambda: chart_trend(videos),
-                 "View counts across videos in database order; peaks mark standout uploads.", half_w),
+            cell("11. View Count Chronological Timeline Trend", lambda: chart_trend(videos),
+                 "View counts across uploads ordered chronologically by publication date; peaks mark standout uploads.", half_w),
             cell("12. Comment Volume per Upload Leaderboard", lambda: chart_comment_leaderboard(videos),
                  "The five uploads that generated the most discussion.", half_w)))
 
@@ -508,10 +529,22 @@ def generate_professional_pdf():
 
     # ------------------------------------------------------------------ Section 4: Whisper audio analysis
     story.append(PageBreak())
-    story.append(Paragraph("4. Whisper Audio Analysis: What the Competitors Say", heading_style))
-    story.append(Paragraph(
-        "The first minutes of each video's audio are streamed straight into memory and analysed by OpenAI Whisper - no audio file is ever stored, only the text. "
-        "Videos Whisper has not reached yet use YouTube captions as a stop-gap and are upgraded on later runs.", body_style))
+    story.append(Paragraph("4. Audio Analysis & Spoken Content: What the Competitors Say", heading_style))
+    whisper_cnt = int((transcripts["source"] == "whisper").sum()) if not transcripts.empty else 0
+    captions_cnt = int((transcripts["source"] == "captions").sum()) if not transcripts.empty else 0
+    unavail_cnt = int((transcripts["source"] == "audio_unavailable").sum()) if not transcripts.empty else 0
+
+    if whisper_cnt > 0:
+        desc_s4 = ("The first minutes of each video's audio are streamed straight into memory and analysed by OpenAI Whisper - no audio file is ever stored, only the text. "
+                   "Videos Whisper has not reached yet use YouTube captions as a stop-gap and are upgraded on later runs.")
+    elif captions_cnt > 0:
+        desc_s4 = (f"Audio transcription via Whisper is currently pending or restricted by platform access. YouTube captions ({captions_cnt} video(s)) "
+                   "have been lawfully acquired as a validated fallback for content intelligence.")
+    else:
+        desc_s4 = ("Audio transcription via Whisper and captions are currently pending or restricted by platform access controls. "
+                   "Metadata and comment analysis continue uninterrupted.")
+    story.append(Paragraph(desc_s4, body_style))
+
     wsum = ins.whisper_summary(transcripts, videos)
     if wsum["videos"] > 0:
         kpi_w = [("VIDEOS ANALYSED BY WHISPER", f"{wsum['videos']} ({wsum['share']:.0f}%)"),
@@ -542,21 +575,39 @@ def generate_professional_pdf():
                 "16. Topics the Creators Talk About", lambda: chart_spoken_topics(spoken),
                 "Phrases that recur across the competitors' transcripts - what the market already hears from them.", content_w * 0.97)))
     else:
-        story.append(Paragraph("<i>No audio has been analysed by Whisper yet - run the full pipeline.</i>", body_style))
+        story.append(Paragraph(f"<i>No audio has been analysed by Whisper yet in this run. ({captions_cnt} video(s) analyzed via YouTube captions, {unavail_cnt} unavailable/restricted).</i>", body_style))
+        if captions_cnt > 0:
+            spoken = ins.spoken_topics(transcripts[transcripts["source"].isin(["whisper", "captions"])][["video_id", "transcript_text"]])
+            if not spoken.empty:
+                story.append(Spacer(1, 6))
+                story.append(KeepTogether(cell(
+                    "16. Topics the Creators Talk About (from YouTube Captions)", lambda: chart_spoken_topics(spoken),
+                    "Phrases that recur across the competitors' caption transcripts - what the market already hears from them.", content_w * 0.97)))
 
     # ------------------------------------------------------------------ Section 5: relevance
     story.append(PageBreak())
     story.append(Paragraph("5. Content Relevance: What the Video Says vs. What Viewers Write", heading_style))
-    story.append(Paragraph(
-        "Each video's audio is transcribed with OpenAI Whisper. Transcript passages and viewer comments are embedded with a multilingual "
-        "language model and compared: <b>comment alignment</b> is how close comments are to some part of the video, <b>on-topic share</b> is the "
-        "fraction of comments clearly about the video's content, and <b>title alignment</b> checks that the transcript delivers what the title promises. "
-        "The index is a similarity measure - generic praise such as &quot;nice video&quot; naturally lowers it - not a quality verdict.", body_style))
+    if whisper_cnt > 0:
+        rel_desc = (f"Video audio is transcribed with OpenAI Whisper ({whisper_cnt} video(s)) and YouTube captions ({captions_cnt} video(s)). "
+                    "Transcript passages and viewer comments are embedded with a multilingual "
+                    "language model and compared: <b>comment alignment</b> is how close comments are to some part of the video, <b>on-topic share</b> is the "
+                    "fraction of comments clearly about the video's content, and <b>title alignment</b> checks that the transcript delivers what the title promises. "
+                    "The index is a similarity measure - generic praise such as &quot;nice video&quot; naturally lowers it - not a quality verdict.")
+    elif captions_cnt > 0:
+        rel_desc = (f"Analysis utilizes YouTube captions ({captions_cnt} video(s)) and video titles/descriptions (Whisper audio acquisition pending/restricted). "
+                    "Caption passages and viewer comments are embedded with a multilingual language model and compared: "
+                    "<b>comment alignment</b> measures discussion correlation with captions, <b>on-topic share</b> reflects content relevance, "
+                    "and <b>title alignment</b> measures title faithfulness. The index is a similarity measure, not a quality verdict.")
+    else:
+        rel_desc = ("Analysis currently utilizes video titles, descriptions, and viewer comments (transcripts pending or unavailable). "
+                    "Embedded representations compare viewer feedback against stated video topics. The index is a similarity measure, not a quality verdict.")
+    story.append(Paragraph(rel_desc, body_style))
+
     if not rel.empty:
         kpi2 = [("AVG RELEVANCE INDEX", f"{rel['relevance_index'].mean():.0f}/100"),
                 ("AVG ON-TOPIC COMMENTS", f"{rel['on_topic_share'].mean() * 100:.0f}%"),
                 ("VIDEOS SCORED", f"{len(rel)}"),
-                ("WHISPER TRANSCRIPTS", f"{int((transcripts['source'] == 'whisper').sum()) if not transcripts.empty else 0}")]
+                ("WHISPER TRANSCRIPTS", f"{whisper_cnt}")]
         t2 = Table([[Paragraph(l, kpi_label) for l, _ in kpi2], [Paragraph(v, kpi_value) for _, v in kpi2]],
                    colWidths=[content_w / 4] * 4)
         t2.setStyle(TableStyle([
@@ -581,10 +632,17 @@ def generate_professional_pdf():
     # ------------------------------------------------------------------ Section 5: topics for next video
     story.append(PageBreak())
     story.append(Paragraph("6. Recommended Topics for Your Next Video", heading_style))
-    story.append(Paragraph(
-        "Based on the Whisper transcripts and viewer comments together: topics are ranked by how many viewers mention them "
-        "(liked comments weigh more), how many explicitly ask for them, how little the existing transcripts already cover them, "
-        "and the audience's sentiment around them.", body_style))
+    if whisper_cnt > 0:
+        topics_desc = ("Based on OpenAI Whisper transcripts, YouTube captions, and viewer comments together: topics are ranked by "
+                       "how many viewers mention them (liked comments weigh more), how many explicitly ask for them, how little the "
+                       "existing transcripts already cover them, and the audience's sentiment around them.")
+    elif captions_cnt > 0:
+        topics_desc = ("Based on lawful YouTube captions and viewer comments together (Whisper transcripts pending/restricted): "
+                       "topics are ranked by viewer demand, explicit requests, caption content coverage gaps, and audience sentiment.")
+    else:
+        topics_desc = ("Based on video titles, descriptions, and viewer comments together (audio transcripts pending/restricted): "
+                       "candidate topics are mined from viewer requests and ranked by audience demand and sentiment.")
+    story.append(Paragraph(topics_desc, body_style))
     topics_global = topics_all[topics_all["scope"] == "ALL"] if not topics_all.empty else topics_all
     if not topics_global.empty:
         story.append(KeepTogether(cell(

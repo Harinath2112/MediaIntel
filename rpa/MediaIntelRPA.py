@@ -98,7 +98,7 @@ class MediaIntelRPA:
             SELECT a.metric, a.velocity, a.baseline, a.ratio, a.severity, a.emailed, v.title, c.channel_name
             FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
             JOIN channels c ON c.channel_id = a.channel_id
-            WHERE a.id IN ({", ".join(str(int(i)) for i in ids)}) ORDER BY a.ratio DESC""")
+            WHERE a.id IN ({", ".join(str(int(i)) for i in ids)}) AND c.is_tracked = TRUE ORDER BY a.ratio DESC""")
         kpi = config.read_sql("""
             SELECT (SELECT COUNT(*) FROM channels WHERE is_tracked = TRUE) AS channels,
                    (SELECT COUNT(*) FROM videos v JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE) AS videos,
@@ -112,9 +112,19 @@ class MediaIntelRPA:
         unit = {"views": "views/hr", "likes": "likes/hr", "comments": "comments/hr"}
         rel_val = round(float(kpi.relevance), 1) if pd.notna(kpi.relevance) else 0.0
 
-        if alert_count:
+        if alert_count and not alerts.empty:
+            # Reflect the highest actual anomaly severity present in the reported set
+            severity_rank = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
+            max_rank = 0
+            max_severity = "MEDIUM"
+            for s in alerts["severity"].dropna():
+                s_str = str(s).strip().upper()
+                if severity_rank.get(s_str, 0) > max_rank:
+                    max_rank = severity_rank[s_str]
+                    max_severity = s_str
+
             top = alerts.iloc[0]
-            level = str(top.severity or "MEDIUM").upper()
+            level = max_severity
             subject = (f"[{level} ALERT] MediaIntel: {alert_count} engagement anomal"
                        f"{'y' if alert_count == 1 else 'ies'} - '{top.channel_name}' is trending")
             intro = "Automated anomaly alert from the MediaIntel platform."

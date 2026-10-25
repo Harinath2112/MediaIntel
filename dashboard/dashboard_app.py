@@ -597,58 +597,109 @@ with tab_performance:
 # ===================== WHISPER AUDIO ANALYSIS =====================
 with tab_whisper:
     section_title("🎙️", "Whisper Audio Analysis — what the competitors actually SAY in their videos")
-    st.caption("The first minutes of each video's audio are streamed straight into memory and analysed by OpenAI Whisper — "
-               "no audio file is ever saved, only the resulting text. Videos Whisper has not reached yet use YouTube captions "
-               "as a stop-gap and are upgraded on later runs.")
+    st.caption("The first minutes of candidate videos are transcribed with OpenAI Faster-Whisper. "
+               "When YouTube server-side streaming is restricted or audio is unavailable, lawful YouTube captions "
+               "are engaged as a fallback so analytics never fabricate text. Provenance is strictly preserved.")
     tx = filtered_videos.merge(transcripts_df, on="video_id", how="left") if not transcripts_df.empty else pd.DataFrame()
     summary = report_helpers.whisper_summary(
         transcripts_df[transcripts_df["video_id"].isin(filtered_videos["video_id"])] if not transcripts_df.empty else transcripts_df,
         filtered_videos)
-    if tx.empty or summary["videos"] == 0 and transcripts_df.empty:
-        empty_state("No audio has been analysed yet — run the pipeline (run.bat).")
+
+    if tx.empty or (channels.empty):
+        empty_state("No audio or transcript telemetry available. Add YouTube channels and run Full Analysis.")
     else:
-        wk1, wk2, wk3, wk4 = st.columns(4)
+        whisper_tx = tx[tx["source"] == "whisper"] if not tx.empty else pd.DataFrame()
+        captions_tx = tx[tx["source"] == "captions"] if not tx.empty else pd.DataFrame()
+        unavail_tx = tx[tx["source"] == "audio_unavailable"] if not tx.empty else pd.DataFrame()
+        failed_tx = tx[tx["source"] == "failed"] if not tx.empty else pd.DataFrame()
+
+        whisper_cnt = len(whisper_tx)
+        captions_cnt = len(captions_tx)
+        unavail_cnt = len(unavail_tx)
+        failed_cnt = len(failed_tx)
+        candidates_cnt = whisper_cnt + captions_cnt + unavail_cnt + failed_cnt
+
+        last_proc_time = "—"
+        if not tx.empty and "updated_at" in tx.columns:
+            valid_times = pd.to_datetime(tx["updated_at"]).dropna()
+            if not valid_times.empty:
+                last_proc_time = valid_times.max().strftime("%b %d, %H:%M UTC")
+
+        wk1, wk2, wk3, wk4, wk5, wk6 = st.columns(6)
         with wk1:
-            kpi_card("🎬", "Videos analysed by Whisper", f"{summary['videos']}  ({summary['share']:.0f}%)", PALETTE[0])
+            kpi_card("🎬", "Candidates Evaluated", f"{candidates_cnt}", PALETTE[0])
         with wk2:
-            kpi_card("⏱️", "Audio analysed", f"{summary['minutes']:.0f} min", PALETTE[1])
+            kpi_card("🎙️", "Whisper Completed", f"{whisper_cnt}", PALETTE[1])
         with wk3:
-            kpi_card("🌐", "Languages detected", f"{len(summary['languages'])}", PALETTE[2])
+            kpi_card("📝", "Captions Fallback", f"{captions_cnt}", PALETTE[2])
         with wk4:
-            kpi_card("🗣️", "Speaking pace", f"{summary['pace']:.0f} wpm" if summary["pace"] else "—", PALETTE[3])
+            kpi_card("⚠️", "Audio Unavailable", f"{unavail_cnt}", PALETTE[3])
+        with wk5:
+            kpi_card("⏱️", "Audio Analysed", f"{summary['minutes']:.0f} min", PALETTE[4])
+        with wk6:
+            kpi_card("🕒", "Last Processed", f"{last_proc_time}", PALETTE[5])
         st.markdown("<br>", unsafe_allow_html=True)
 
         wc1, wc2 = st.columns(2)
         with wc1:
             with st.container(border=True):
-                section_title("🌐", "Spoken Languages (auto-detected by Whisper)")
+                section_title("🌐", "Spoken Languages")
                 if summary["languages"]:
                     lang_df = pd.DataFrame({"Language": list(summary["languages"].keys()), "Videos": list(summary["languages"].values())})
                     fig = px.pie(lang_df, names="Language", values="Videos", hole=0.55, color_discrete_sequence=PALETTE)
+                    fig.update_layout(title="Auto-detected Spoken Languages")
+                    st.plotly_chart(style_fig(fig), width="stretch")
+                elif not captions_tx.empty and "language" in captions_tx.columns:
+                    c_langs = captions_tx["language"].fillna("und").value_counts().to_dict()
+                    lang_df = pd.DataFrame({"Language": list(c_langs.keys()), "Videos": list(c_langs.values())})
+                    fig = px.pie(lang_df, names="Language", values="Videos", hole=0.55, color_discrete_sequence=PALETTE)
+                    fig.update_layout(title="Languages (from YouTube Captions Fallback)")
                     st.plotly_chart(style_fig(fig), width="stretch")
                 else:
-                    empty_state("No Whisper transcripts yet.")
+                    empty_state("No completed Whisper or caption transcripts with language metadata yet.")
         with wc2:
             with st.container(border=True):
-                section_title("📡", "Audio Coverage by Channel")
+                section_title("📡", "Audio & Caption Provenance Coverage by Channel")
                 if not tx.empty:
-                    cov = tx.assign(whisper=(tx["source"] == "whisper")).groupby("channel_id").agg(
-                        analysed=("whisper", "sum"), total=("video_id", "count")).reset_index().merge(
-                        channels[["channel_id", "channel_name"]], on="channel_id")
-                    cov["Not yet analysed by Whisper"] = cov["total"] - cov["analysed"]
-                    fig = px.bar(cov.rename(columns={"analysed": "Analysed by Whisper"}), x="channel_name",
-                                 y=["Analysed by Whisper", "Not yet analysed by Whisper"], barmode="stack",
-                                 color_discrete_sequence=["#8b5cf6", "#475569"], labels={"channel_name": "", "value": "Videos"})
-                    fig.update_layout(legend_title_text="")
+                    cov = tx.groupby("channel_id").agg(
+                        whisper=("source", lambda s: (s == "whisper").sum()),
+                        captions=("source", lambda s: (s == "captions").sum()),
+                        unavail=("source", lambda s: (s == "audio_unavailable").sum()),
+                        total=("video_id", "count")
+                    ).reset_index().merge(channels[["channel_id", "channel_name"]], on="channel_id")
+
+                    fig = px.bar(
+                        cov,
+                        x="channel_name",
+                        y=["whisper", "captions", "unavail"],
+                        barmode="stack",
+                        color_discrete_map={
+                            "whisper": "#8b5cf6",
+                            "captions": "#3b82f6",
+                            "unavail": "#64748b",
+                        },
+                        labels={"channel_name": "", "value": "Videos", "variable": "Source"},
+                    )
+                    fig.update_layout(
+                        legend=dict(
+                            title="",
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1,
+                        )
+                    )
                     st.plotly_chart(style_fig(fig), width="stretch")
 
         wt1, wt2 = st.columns(2)
         with wt1:
             with st.container(border=True):
-                section_title("💬", "Topics the Creators Talk About (from the transcripts)")
-                spoken = report_helpers.spoken_topics(tx[tx["source"].isin(["whisper", "captions"])][["video_id", "transcript_text"]]) if not tx.empty else pd.DataFrame()
+                section_title("💬", "Topics the Creators Talk About (from transcripts/captions)")
+                valid_tx_subset = tx[tx["source"].isin(["whisper", "captions"]) & tx["transcript_text"].notna()]
+                spoken = report_helpers.spoken_topics(valid_tx_subset[["video_id", "transcript_text"]]) if not valid_tx_subset.empty else pd.DataFrame()
                 if spoken.empty:
-                    empty_state("Not enough transcript text to extract topics yet.")
+                    empty_state("Not enough transcript or caption text to extract creator topics yet.")
                 else:
                     fig = px.bar(spoken.iloc[::-1], x="videos", y="topic", orientation="h", color="videos",
                                  color_continuous_scale=["#4c1d95", "#8b5cf6", "#22d3ee"], labels={"videos": "Videos mentioning it", "topic": ""})
@@ -674,17 +725,28 @@ with tab_whisper:
                     st.plotly_chart(style_fig(fig), width="stretch")
 
         with st.container(border=True):
-            section_title("📜", "Transcript Viewer")
-            have = tx[tx["transcript_text"].notna()] if not tx.empty else pd.DataFrame()
-            if have.empty:
-                empty_state("No transcripts stored yet.")
+            section_title("📜", "Transcript & Audio Status Viewer")
+            tx_evaluated = tx[tx["source"].notna()] if not tx.empty else pd.DataFrame()
+            if tx_evaluated.empty:
+                empty_state("No candidate videos evaluated for audio or transcripts yet.")
             else:
-                pick = st.selectbox("Video", have["title"].tolist(), key="tx_pick")
-                row = have[have["title"] == pick].iloc[0]
-                mins = (row["audio_seconds"] or 0) / 60 if pd.notna(row["audio_seconds"]) else 0
-                st.caption(f"Source: **{row['source']}** · model: {row['model_name']} · language: {row['language']} · "
-                           f"{int(row['word_count'] or 0)} words · {mins:.1f} min of audio analysed")
-                st.text_area("Transcript", str(row["transcript_text"] or ""), height=220)
+                pick = st.selectbox("Select Candidate Video", tx_evaluated["title"].tolist(), key="tx_pick")
+                row = tx_evaluated[tx_evaluated["title"] == pick].iloc[0]
+                src = str(row.get("source") or "unknown")
+                mins = (row["audio_seconds"] or 0) / 60 if pd.notna(row.get("audio_seconds")) else 0
+
+                if src == "whisper":
+                    st.success(f"🎙️ **Audio Transcription Source: OpenAI Faster-Whisper** · Model: `{row.get('model_name')}` · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words · {mins:.1f} min audio decoded")
+                    st.text_area("Whisper Transcript", str(row["transcript_text"] or ""), height=220)
+                elif src == "captions":
+                    st.info(f"📝 **Transcription Source: Official/Community YouTube Captions (Lawful Fallback)** · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words")
+                    st.text_area("Captions Text", str(row["transcript_text"] or ""), height=220)
+                elif src == "audio_unavailable":
+                    err_text = str(row.get("last_error") or "YouTube streaming restricted; no captions available on video.")
+                    st.warning(f"⚠️ **Audio Unavailable:** {err_text}")
+                    st.caption("No transcript text is fabricated. Fallback title and description are utilized for downstream relevance analysis.")
+                else:
+                    st.error(f"❌ **Status: {src}** — {str(row.get('last_error') or 'Processing pending or failed')}")
 
 # ===================== RELEVANCE & NEXT TOPICS =====================
 with tab_relevance:

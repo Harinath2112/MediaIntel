@@ -317,3 +317,128 @@ def upsert_sql(table: str, columns: list[str], keys: list[str], update: list[str
         )
 
     raise ValueError(f"Unsupported database dialect: {dialect}")
+
+
+def diagnose_database_connection(url_str: str | None = None) -> dict:
+    """Non-secret-revealing database connectivity preflight and actionable diagnostics."""
+    from sqlalchemy.engine import make_url
+    from sqlalchemy import create_engine, text
+
+    raw_url = url_str or database_url()
+    try:
+        url_obj = make_url(raw_url)
+    except Exception as exc:
+        return {
+            "healthy": False,
+            "error_type": "URL_PARSE_ERROR",
+            "message": f"Failed to parse database URL: {exc}",
+            "recommendation": "Check for unencoded characters (@, #, :, /, %) in the database password. Special characters must be URL percent-encoded.",
+        }
+
+    dialect = url_obj.get_backend_name()
+    host = url_obj.host or "local"
+    port = url_obj.port
+    username = url_obj.username or ""
+    database_name = url_obj.database or ""
+
+    diag = {
+        "healthy": False,
+        "backend": dialect,
+        "host": host,
+        "port": port,
+        "database": database_name,
+        "user_masked": username[:3] + "***" if len(username) > 3 else ("***" if username else "none"),
+        "error_type": None,
+        "message": None,
+        "recommendation": None,
+    }
+
+    # Supabase Connection Pooler tenant check
+    if host and ("pooler.supabase.com" in host or port == 6543):
+        if username and ("." not in username and "[" not in username):
+            diag["recommendation"] = (
+                "Actionable Check: Connecting to Supabase Connection Pooler (port 6543 / pooler.supabase.com) "
+                "requires username format 'postgres.<project-ref>'. Connecting with plain 'postgres' causes "
+                "'FATAL: password authentication failed for user postgres'. Verify MEDIAINTEL_DB_URL."
+            )
+
+    test_engine = None
+    try:
+        if dialect == "sqlite":
+            test_engine = create_engine(raw_url, connect_args={"timeout": 10})
+        elif "postgresql" in dialect:
+            test_engine = create_engine(raw_url, connect_args={"sslmode": "require", "connect_timeout": 10})
+        else:
+            test_engine = create_engine(raw_url)
+
+        with test_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+        diag["healthy"] = True
+        diag["message"] = f"Successfully connected to {dialect} database ({database_name})."
+        return diag
+    except Exception as exc:
+        err_msg = str(exc)
+        if "password authentication failed" in err_msg.lower():
+            diag["error_type"] = "AUTHENTICATION_FAILED"
+            diag["message"] = "Password authentication failed."
+            if not diag["recommendation"]:
+                diag["recommendation"] = (
+                    "Verify MEDIAINTEL_DB_URL secret. If using Supabase Connection Pooler, "
+                    "ensure username is 'postgres.<project-ref>' and password special characters are URL-encoded."
+                )
+        elif "could not translate host name" in err_msg.lower() or "name or service not known" in err_msg.lower():
+            diag["error_type"] = "DNS_RESOLUTION_FAILED"
+            diag["message"] = f"Host name '{host}' could not be resolved."
+            if not diag["recommendation"]:
+                diag["recommendation"] = "Verify the database host in MEDIAINTEL_DB_URL."
+        elif "connection timed out" in err_msg.lower() or "timeout" in err_msg.lower():
+            diag["error_type"] = "CONNECTION_TIMEOUT"
+            diag["message"] = "Database connection timed out."
+            if not diag["recommendation"]:
+                diag["recommendation"] = "Verify network connectivity, firewall, or ensure Supabase project is not paused."
+        elif "ssl" in err_msg.lower():
+            diag["error_type"] = "SSL_ERROR"
+            diag["message"] = "SSL negotiation failed."
+            if not diag["recommendation"]:
+                diag["recommendation"] = "Ensure 'sslmode=require' is configured in PostgreSQL connection."
+        else:
+            diag["error_type"] = "OPERATIONAL_ERROR"
+            diag["message"] = f"Database connection failed: {err_msg[:120]}"
+            if not diag["recommendation"]:
+                diag["recommendation"] = "Verify MEDIAINTEL_DB_URL connection parameters."
+        return diag
+    finally:
+        if test_engine is not None:
+            try:
+                test_engine.dispose()
+            except Exception:
+                pass
+
+
+def verify_database_preflight() -> bool:
+    """Run database connectivity preflight and print safe diagnostic output."""
+    res = diagnose_database_connection()
+    print("\n--- MediaIntel Database Preflight Diagnosis ---")
+    print(f"Backend       : {res.get('backend')}")
+    print(f"Host          : {res.get('host')}")
+    print(f"Port          : {res.get('port')}")
+    print(f"Database      : {res.get('database')}")
+    print(f"User          : {res.get('user_masked')}")
+    print(f"Status        : {'CONNECTED' if res['healthy'] else 'FAILED'}")
+    if res["healthy"]:
+        print(f"Notice        : {res['message']}\n")
+        return True
+    else:
+        print(f"Error Type    : {res.get('error_type')}")
+        print(f"Details       : {res.get('message')}")
+        if res.get('recommendation'):
+            print(f"Action Advice : {res.get('recommendation')}")
+        print("\n")
+        return False
+
+
+if __name__ == "__main__":
+    ok = verify_database_preflight()
+    sys.exit(0 if ok else 1)
+

@@ -43,16 +43,23 @@ def _recent_rates(videos: pd.DataFrame) -> pd.DataFrame:
     hist = config.read_sql("SELECT video_id, view_count, like_count, comment_count, captured_at "
                            "FROM video_stats_history ORDER BY captured_at")
     hist = hist[hist["video_id"].isin(videos["video_id"])]
+    if hist.empty:
+        return pd.DataFrame(columns=["video_id", "recent_views", "recent_likes", "recent_comments"])
     rows = []
+    from datetime import timedelta
     for vid, g in hist.groupby("video_id"):
         if len(g) < 2:
             continue
-        newest = g.iloc[-1]
-        older = g[g["captured_at"] <= newest["captured_at"] - pd.Timedelta(hours=1)]
+        g_captured = pd.to_datetime(g["captured_at"])
+        newest_time = g_captured.iloc[-1]
+        older_mask = g_captured <= (newest_time - timedelta(hours=1))
+        older = g[older_mask]
         if older.empty:
             continue
         ref = older.iloc[-1]
-        hrs = (newest["captured_at"] - ref["captured_at"]).total_seconds() / 3600
+        newest = g.iloc[-1]
+        ref_time = g_captured[older.index[-1]]
+        hrs = (newest_time - ref_time).total_seconds() / 3600.0
         if hrs <= 0:
             continue
         rows.append({"video_id": vid,
@@ -70,8 +77,9 @@ def detect() -> list[dict]:
         WHERE v.published_at IS NOT NULL AND c.is_tracked = TRUE""")
     if vids.empty:
         return []
-    now = config.utcnow()
-    vids["hours"] = ((now - vids["published_at"]).dt.total_seconds() / 3600).clip(lower=1)
+    now = pd.Timestamp(config.utcnow())
+    pub_series = pd.to_datetime(vids["published_at"])
+    vids["hours"] = ((now - pub_series).dt.total_seconds() / 3600.0).clip(lower=1.0)
     for m, col in COLUMN.items():
         vids[f"rate_{m}"] = vids[col] / vids["hours"]
 
@@ -103,8 +111,10 @@ def detect() -> list[dict]:
 def _already_reported() -> set[tuple[str, str]]:
     if COOLDOWN_H <= 0:
         return set()
+    from datetime import timedelta
+    cutoff = config.utcnow() - timedelta(hours=COOLDOWN_H)
     df = config.read_sql("SELECT video_id, metric FROM anomaly_alerts WHERE detected_at >= :cut",
-                         {"cut": config.utcnow() - pd.Timedelta(hours=COOLDOWN_H)})
+                         {"cut": cutoff})
     return set(zip(df["video_id"], df["metric"]))
 
 
@@ -122,6 +132,7 @@ def alerts_for_report(limit: int = MAX_ALERTS) -> tuple[pd.DataFrame, int]:
     """The alerts listed in EVERY e-mail and in AlertSummary.txt, so a repeat or --quick run looks just like a full run:
     unsent alerts first (strongest first), then topped up with the strongest recent alerts that were already sent.
     Returns (alerts with an `is_new` flag, number of unsent alerts in total)."""
+    from datetime import timedelta
     base = """
         SELECT a.id, a.metric, a.velocity, a.baseline, a.ratio, a.severity, a.detected_at, a.emailed,
                v.title, c.channel_name
@@ -133,8 +144,9 @@ def alerts_for_report(limit: int = MAX_ALERTS) -> tuple[pd.DataFrame, int]:
     frames = [new.head(limit)]
     room = limit - len(frames[0])
     if room > 0 and LOOKBACK_H > 0:
+        cutoff = config.utcnow() - timedelta(hours=LOOKBACK_H)
         old = config.read_sql(base + "a.emailed = 1 AND a.detected_at >= :cut ORDER BY a.ratio DESC, a.id",
-                              {"cut": config.utcnow() - pd.Timedelta(hours=LOOKBACK_H)})
+                              {"cut": cutoff})
         frames.append(old.head(room))
     frames = [f for f in frames if not f.empty]
     df = pd.concat(frames, ignore_index=True) if frames else new

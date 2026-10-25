@@ -144,11 +144,28 @@ def run_ai_pipeline(
     sentiment = nlp_models.get_sentiment_model()
     model_name = getattr(sentiment, "name", nlp_models.SENTIMENT_MODEL)
 
+    budget_minutes = (
+        time_budget_min
+        if time_budget_min is not None
+        else config.env_float("NLP_TIME_BUDGET_MIN", 24.0)
+    )
+    time_budget_sec = budget_minutes * 60.0 if budget_minutes and budget_minutes > 0 else 0.0
+
     print("Fetching comments that need (re)analysis...")
-    df = _pending(preview or limit, reprocess_all and not preview, model_name)
-    if df.empty:
+    all_pending_df = _pending(None, reprocess_all and not preview, model_name)
+    total_eligible = len(all_pending_df)
+
+    if all_pending_df.empty:
         print("No new comments to analyse - everything is up to date.")
         return 0
+
+    effective_limit = preview if preview > 0 else (int(limit) if (limit is not None and int(limit) > 0) else 0)
+    if effective_limit > 0:
+        df = all_pending_df.head(effective_limit)
+        print(f"Found {total_eligible} eligible unprocessed comment(s). Processing limit applied: {len(df)}.")
+    else:
+        df = all_pending_df
+        print(f"Found {total_eligible} eligible unprocessed comment(s). Processing all pending comments up to safe time budget ({budget_minutes:.1f}m).")
 
     matcher = asp.AspectMatcher(nlp_models.get_embedder())
     print(f"{len(df)} comment(s) queued for RoBERTa/ABSA analysis ({model_name}).")
@@ -163,19 +180,14 @@ def run_ai_pipeline(
                 print(f"     - {a['aspect']:<16} {a['sentiment_label']:<8} polarity {a['polarity']:+.2f}   <- \"{a['evidence'][:60]}\"")
         return len(sample)
 
-    budget_minutes = (
-        time_budget_min
-        if time_budget_min is not None
-        else config.env_float("NLP_TIME_BUDGET_MIN", 24.0)
-    )
-    time_budget_sec = budget_minutes * 60.0 if budget_minutes and budget_minutes > 0 else 0.0
-
     done, started = 0, time.time()
+    budget_hit = False
     for start in range(0, len(df), CHUNK):
         elapsed = time.time() - started
         if time_budget_sec > 0 and elapsed >= time_budget_sec and done > 0:
+            budget_hit = True
             print(f"\n⚠️ Safe time budget reached ({elapsed / 60.0:.1f}m / {budget_minutes:.1f}m). "
-                  f"Processed and committed {done}/{len(df)} comments. Remaining {len(df) - done} comments will be processed in the next run.")
+                  f"Processed and committed {done}/{len(df)} queued comments.")
             break
 
         chunk = df.iloc[start:start + CHUNK]
@@ -184,7 +196,17 @@ def run_ai_pipeline(
         done += len(chunk)
         rate = done / max(time.time() - started, 1e-6)
         print(f"  analysed {done}/{len(df)} comments ({rate:.0f}/s)")
-    print(f"Analysed and stored {done} comments with aspect-level sentiment.")
+
+    remaining_in_db = max(total_eligible - done, 0)
+    print(f"\n--- RoBERTa / ABSA Intelligence Status ---")
+    print(f"  Eligible unprocessed comments detected : {total_eligible}")
+    print(f"  Comments analysed and saved this run   : {done}")
+    print(f"  Remaining unanalysed comments in DB    : {remaining_in_db}")
+    if remaining_in_db > 0:
+        print(f"  Resumable strategy: The remaining {remaining_in_db} comment(s) are safely preserved in the database and will be processed in subsequent runs.")
+    else:
+        print(f"  Complete coverage: 100% of eligible comments for active tracked channels have been analyzed.")
+
     try:
         from core import channel_manager
         channel_manager.update_all_channel_run_coverage()

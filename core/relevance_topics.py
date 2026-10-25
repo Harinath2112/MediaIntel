@@ -259,10 +259,15 @@ def compute_relevance(videos, comments, existing, embedder):
         for vid in set(owners):
             chunk_emb[vid] = emb[[i for i, o in enumerate(owners) if o == vid]]
 
+    skipped_reasons = {}
     for _, v in videos.iterrows():
         vid = v.video_id
         g = by_video.get(vid)
-        if g is None or g.empty or vid not in chunk_emb:
+        if g is None or g.empty:
+            skipped_reasons[vid] = "0 comments collected (comments disabled or none posted by viewers)"
+            continue
+        if vid not in chunk_emb:
+            skipped_reasons[vid] = "no usable text found (title, description, and transcript are empty)"
             continue
         g = g.sort_values("like_count", ascending=False)
         if MAX_COMMENTS_PER_VIDEO > 0:
@@ -400,7 +405,10 @@ def run() -> None:
                 "n_comments", "text_source", "computed_at"]
         with config.get_engine().begin() as conn:
             conn.execute(config.upsert_sql("video_relevance", cols, ["video_id"]), [dict(r, computed_at=stamp) for r in rows])
-    print(f"  relevance computed for {len(rows)} video(s) (others unchanged)")
+    print(f"  relevance computed for {len(rows)} video(s) of {len(videos)} total active videos.")
+    if len(videos) > len(rows):
+        skipped_count = len(videos) - len(rows)
+        print(f"  Note: {skipped_count} video(s) omitted from new relevance calculations (either previously up to date or lacking comments/transcripts).")
 
     print("Mining topics for the next video...")
     channel_tokens = {t for name in videos["channel_name"].unique() for t in _tokens(name)}
