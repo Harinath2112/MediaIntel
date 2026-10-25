@@ -71,7 +71,14 @@ def load_extra():
         "relevance": safe("""SELECT r.*, v.title, v.channel_id, c.channel_name FROM video_relevance r
                              JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id
                              WHERE c.is_tracked = TRUE"""),
-        "topics": safe("SELECT * FROM topic_suggestions ORDER BY scope, rank_no"),
+        "topics": safe("""SELECT t.* FROM topic_suggestions t
+                          WHERE (
+                              UPPER(t.scope) = 'ALL' 
+                              AND EXISTS (SELECT 1 FROM channels c JOIN videos v ON v.channel_id = c.channel_id WHERE c.is_tracked = TRUE)
+                          ) OR (
+                              t.scope IN (SELECT channel_id FROM channels WHERE is_tracked = TRUE)
+                          )
+                          ORDER BY t.scope, t.rank_no"""),
         "transcripts": safe("SELECT video_id, source, language, model_name, word_count, audio_seconds, transcript_text FROM transcripts"),
         "alerts": safe("""SELECT a.id, a.detected_at, a.metric, a.velocity, a.baseline, a.ratio, a.severity, a.emailed, v.title, c.channel_name
                           FROM anomaly_alerts a JOIN videos v ON v.video_id = a.video_id
@@ -650,9 +657,12 @@ with tab_whisper:
         with wt2:
             with st.container(border=True):
                 section_title("🧭", "What Viewers Ask For vs. What Videos Cover")
-                scope_w = "ALL" if selected_channel == "All Channels" else channels.loc[channels["channel_name"] == selected_channel, "channel_id"].values[0]
-                tp_w = topics_df[topics_df["scope"] == scope_w].head(8) if not topics_df.empty else topics_df
-                if tp_w.empty:
+                scope_w = "ALL"
+                if selected_channel != "All Channels" and not channels.empty:
+                    c_matches = channels.loc[channels["channel_name"] == selected_channel, "channel_id"].values
+                    scope_w = c_matches[0] if len(c_matches) else "ALL"
+                tp_w = topics_df[topics_df["scope"].str.upper() == str(scope_w).upper()].head(8) if not topics_df.empty and "scope" in topics_df.columns else pd.DataFrame()
+                if channels.empty or filtered_videos.empty or tp_w.empty:
                     empty_state("Topic analysis has not run yet.")
                 else:
                     cmp_df = pd.DataFrame({"Topic": list(tp_w["topic"]) * 2,
@@ -683,9 +693,11 @@ with tab_relevance:
                "The index (0–100) is a similarity measure: how closely the discussion follows the video's real content. "
                "Generic praise ('nice video') naturally lowers it; it is not a quality verdict.")
 
-    rel_f = relevance_df[relevance_df["video_id"].isin(filtered_videos["video_id"])] if not relevance_df.empty else relevance_df
-    if rel_f.empty:
-        empty_state("Relevance has not been computed yet — run the full pipeline (run.bat).")
+    rel_f = relevance_df[relevance_df["video_id"].isin(filtered_videos["video_id"])] if not relevance_df.empty and not filtered_videos.empty else pd.DataFrame()
+    if channels.empty:
+        empty_state("No analysis data available. Add YouTube channels through the Administrator Command Center and run Full Analysis to generate recommendations.")
+    elif filtered_videos.empty or rel_f.empty:
+        empty_state("Relevance has not been computed yet — run Full Analysis in the Administrator Command Center.")
     else:
         src_by_video = transcripts_df.set_index("video_id")["source"] if not transcripts_df.empty else pd.Series(dtype=str)
         fv_src = filtered_videos["video_id"].map(src_by_video).fillna("none").replace({"failed": "none"})
@@ -763,12 +775,17 @@ with tab_relevance:
     st.markdown("<br>", unsafe_allow_html=True)
     section_title("💡", "Topics for Your Next Video  ·  from Whisper transcripts + comments")
     scope_id = "ALL"
-    if selected_channel != "All Channels":
-        scope_id = channels.loc[channels["channel_name"] == selected_channel, "channel_id"].values[0]
-    tp = topics_df[topics_df["scope"] == scope_id] if not topics_df.empty else topics_df
+    if selected_channel != "All Channels" and not channels.empty:
+        c_matches = channels.loc[channels["channel_name"] == selected_channel, "channel_id"].values
+        scope_id = c_matches[0] if len(c_matches) else "ALL"
+    tp = topics_df[topics_df["scope"].str.upper() == str(scope_id).upper()] if not topics_df.empty and "scope" in topics_df.columns else pd.DataFrame()
     st.caption(f"Scope: **{selected_channel}** · Score = 40% demand + 30% explicit requests + 20% content gap + 10% audience sentiment.")
-    if tp.empty:
-        empty_state("No topic suggestions yet — run the full pipeline (run.bat).")
+    if channels.empty:
+        empty_state("No analysis data available. Add YouTube channels through the Administrator Command Center and run Full Analysis to generate recommendations.")
+    elif filtered_videos.empty:
+        empty_state("Analysis pending for newly added channels — run Full Analysis in the Administrator Command Center to generate recommendations.")
+    elif tp.empty:
+        empty_state("No topic suggestions available yet — run Full Analysis in the Administrator Command Center to generate recommendations.")
     else:
         tc1, tc2 = st.columns([3, 2])
         with tc1:

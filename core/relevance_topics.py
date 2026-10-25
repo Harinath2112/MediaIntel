@@ -387,6 +387,8 @@ def run() -> None:
     videos, comments, request_ids, existing = load_data()
     if videos.empty or comments.empty:
         print("No videos/comments yet - nothing to analyse.")
+        with config.get_engine().begin() as conn:
+            conn.execute(text("DELETE FROM topic_suggestions"))
         return
     embedder = nlp_models.get_embedder()
 

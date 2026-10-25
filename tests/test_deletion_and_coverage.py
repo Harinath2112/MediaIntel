@@ -302,13 +302,17 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         self._seed_channel_with_full_records(cid_a, "Channel A")
         self._seed_channel_with_full_records(cid_b, "Channel B")
 
-        # Add shared global topic with scope='all'
+        # Add channel-scoped topics and shared global topic with scope='all'
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.begin() as conn:
             conn.execute(text("""
                 INSERT INTO topic_suggestions (scope, rank_no, topic, score, mentions, generated_at)
                 VALUES ('all', 1, 'Global AI Trends', 0.99, 100, :now)
             """), {"now": now})
+            conn.execute(text("""
+                INSERT INTO topic_suggestions (scope, rank_no, topic, score, mentions, generated_at)
+                VALUES (:cid, 1, 'Channel B Topic', 0.88, 50, :now)
+            """), {"cid": cid_b, "now": now})
 
         # Delete Channel A
         with patch("core.storage_audio.delete_storage_audio_objects", return_value={"success": True, "deleted_count": 1}):
@@ -327,9 +331,20 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         c_b = config.read_sql("SELECT COUNT(*) AS cnt FROM comments WHERE video_id LIKE :pattern", {"pattern": f"%{cid_b}%"})
         self.assertEqual(int(c_b.iloc[0]["cnt"]), 4)
 
-        # Verify global topic (scope='all') was NOT deleted
-        top_global = config.read_sql("SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE scope = 'all'")
-        self.assertEqual(int(top_global.iloc[0]["cnt"]), 1)
+        # Verify Channel B's channel-scoped topics were preserved
+        top_b = config.read_sql("SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE scope = :cid", {"cid": cid_b})
+        self.assertEqual(int(top_b.iloc[0]["cnt"]), 2)
+
+        # Verify global topic (scope='all') that incorporated Channel A was invalidated
+        top_global = config.read_sql("SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE UPPER(scope) = 'ALL'")
+        self.assertEqual(int(top_global.iloc[0]["cnt"]), 0)
+
+        # When Channel B (final channel) is deleted, all topics must be wiped
+        with patch("core.storage_audio.delete_storage_audio_objects", return_value={"success": True, "deleted_count": 1}):
+            res_b = channel_manager.delete_channel_permanently(cid_b, confirmation="DELETE", admin_user=True)
+        self.assertTrue(res_b["success"])
+        all_topics = config.read_sql("SELECT COUNT(*) AS cnt FROM topic_suggestions")
+        self.assertEqual(int(all_topics.iloc[0]["cnt"]), 0)
 
     def test_08_workflow_concurrency_protection(self):
         """Test 8: Deletion is blocked if a cloud workflow is running or audio is locked."""

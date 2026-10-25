@@ -886,10 +886,16 @@ def preview_channel_deletion(
         """, {"cid": cid})
         counts["anomaly_alerts"] = int(aa_df.iloc[0]["cnt"]) if not aa_df.empty else 0
 
-        top_df = config.read_sql("""
-            SELECT COUNT(*) AS cnt FROM topic_suggestions
-            WHERE scope = :cid
-        """, {"cid": cid})
+        # Check remaining channels if this channel is deleted
+        ch_count_df = config.read_sql("SELECT COUNT(*) AS cnt FROM channels WHERE channel_id != :cid", {"cid": cid})
+        rem_chans = int(ch_count_df.iloc[0]["cnt"]) if not ch_count_df.empty else 0
+        if rem_chans == 0:
+            top_df = config.read_sql("SELECT COUNT(*) AS cnt FROM topic_suggestions")
+        else:
+            top_df = config.read_sql("""
+                SELECT COUNT(*) AS cnt FROM topic_suggestions
+                WHERE scope = :cid OR UPPER(scope) = 'ALL'
+            """, {"cid": cid})
         counts["topic_suggestions"] = int(top_df.iloc[0]["cnt"]) if not top_df.empty else 0
 
         cov_df = config.read_sql("""
@@ -1074,11 +1080,18 @@ def delete_channel_permanently(
                    )
             """), {"cid": cid})
 
-            # 9. topic_suggestions (strictly channel-scoped, preserving scope = 'all' and other channels)
-            conn.execute(text("""
-                DELETE FROM topic_suggestions
-                WHERE scope = :cid
-            """), {"cid": cid})
+            # 9. topic_suggestions
+            # Check remaining channels
+            rem_count = conn.execute(text("SELECT COUNT(*) FROM channels WHERE channel_id != :cid"), {"cid": cid}).scalar()
+            if int(rem_count or 0) == 0:
+                # Last channel: wipe ALL topic suggestions completely (channel-scoped and global)
+                conn.execute(text("DELETE FROM topic_suggestions"))
+            else:
+                # Invalidate channel-scoped topics and global suggestions that incorporated this channel
+                conn.execute(text("""
+                    DELETE FROM topic_suggestions
+                    WHERE scope = :cid OR UPPER(scope) = 'ALL'
+                """), {"cid": cid})
 
             # 10. videos
             conn.execute(text("""
