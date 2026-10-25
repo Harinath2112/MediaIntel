@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pandas as pd
+
 from core import anomaly_alert, config  # noqa: E402
 
 PDF_PATH = config.OUTPUTS_DIR / "MediaIntel_Dashboard_Documentation.pdf"
@@ -103,11 +105,12 @@ class MediaIntelRPA:
                    (SELECT COUNT(*) FROM sentiment_insights s JOIN comments m ON m.comment_id = s.comment_id
                       JOIN videos v ON v.video_id = m.video_id JOIN channels c ON c.channel_id = v.channel_id
                       WHERE c.is_tracked = TRUE) AS comments,
-                   (SELECT ROUND(AVG(r.relevance_index), 1) FROM video_relevance r JOIN videos v ON v.video_id = r.video_id
+                   (SELECT AVG(r.relevance_index) FROM video_relevance r JOIN videos v ON v.video_id = r.video_id
                       JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE) AS relevance""").iloc[0]
         topics = config.read_sql("SELECT topic, score, evidence FROM topic_suggestions "
                                  "WHERE scope = 'ALL' AND rank_no <= 5 ORDER BY rank_no")
         unit = {"views": "views/hr", "likes": "likes/hr", "comments": "comments/hr"}
+        rel_val = round(float(kpi.relevance), 1) if pd.notna(kpi.relevance) else 0.0
 
         if alert_count:
             top = alerts.iloc[0]
@@ -144,9 +147,9 @@ class MediaIntelRPA:
                 text_lines += [note, ""]
                 html.append(f"<p style='color:#92400e'>{escape(note)}</p>")
         text_lines.append(f"Tracked competitors: {int(kpi.channels)} | Videos: {int(kpi.videos)} | "
-                          f"Comments analysed: {int(kpi.comments)} | Avg relevance index: {kpi.relevance}")
+                          f"Comments analysed: {int(kpi.comments)} | Avg relevance index: {rel_val}")
         html.append(f"<p><b>Tracked competitors:</b> {int(kpi.channels)} &nbsp; <b>Videos:</b> {int(kpi.videos)} &nbsp; "
-                    f"<b>Comments analysed:</b> {int(kpi.comments)} &nbsp; <b>Avg relevance index:</b> {kpi.relevance}</p>")
+                    f"<b>Comments analysed:</b> {int(kpi.comments)} &nbsp; <b>Avg relevance index:</b> {rel_val}</p>")
         if len(topics):
             text_lines += ["", "TOP TOPICS FOR YOUR NEXT VIDEO"]
             html.append("<h3>Top topics for your next video</h3><ol>")
