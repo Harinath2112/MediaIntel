@@ -559,6 +559,50 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         self.assertEqual(apna_prev["pending_audio_records"], 0)
         self.assertEqual(apna_prev["active_set_transcripts"], 2)
 
+    def test_16_nlp_pipeline_coverage_refresh(self):
+        """Test 16: Verify that coverage ledger synchronizes from Analyzing (0/N) to Analyzed (N/N) after AI analysis."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cid = "UC_NLP_SYNC"
+        cname = "NLP Sync Channel"
+
+        with self.engine.begin() as conn:
+            conn.execute(text("INSERT INTO channels (channel_id, channel_name, is_tracked) VALUES (:cid, :cname, TRUE)"),
+                         {"cid": cid, "cname": cname})
+            for idx in [1, 2]:
+                conn.execute(text("""
+                    INSERT INTO videos (video_id, channel_id, title, published_at, view_count, like_count, comment_count)
+                    VALUES (:vid, :cid, :title, :now, 100, 10, 2)
+                """), {"vid": f"vid_{idx}_{cid}", "cid": cid, "title": f"Video {idx}", "now": now})
+
+            for idx in range(1, 5):
+                vid = f"vid_1_{cid}" if idx <= 2 else f"vid_2_{cid}"
+                conn.execute(text("""
+                    INSERT INTO comments (comment_id, video_id, author_name, comment_text, like_count, published_at)
+                    VALUES (:cid_comm, :vid, 'Viewer', 'Comment text', 1, :now)
+                """), {"cid_comm": f"comm_{idx}_{cid}", "vid": vid, "now": now})
+
+        # Step 1: Coverage right after ingestion (before NLP analysis)
+        channel_manager.update_all_channel_run_coverage(video_limit=2)
+        cov_df_1 = channel_manager.get_channel_run_coverage_df()
+        row_1 = cov_df_1[cov_df_1["Channel Name"] == cname].iloc[0]
+        self.assertEqual(row_1["Collected Comments"], 4)
+        self.assertEqual(row_1["Sentiment Status"], "Analyzing (0/4)")
+
+        # Step 2: Simulate NLP analysis storing sentiment insights
+        with self.engine.begin() as conn:
+            for idx in range(1, 5):
+                conn.execute(text("""
+                    INSERT INTO sentiment_insights (comment_id, sentiment_label, sentiment_score, polarity, aspect_category, analyzed_at)
+                    VALUES (:comm_id, 'Positive', 0.95, 0.9, 'Content Quality', :now)
+                """), {"comm_id": f"comm_{idx}_{cid}", "now": now})
+
+        # Step 3: Coverage update after NLP analysis completes
+        channel_manager.update_all_channel_run_coverage(video_limit=2)
+        cov_df_2 = channel_manager.get_channel_run_coverage_df()
+        row_2 = cov_df_2[cov_df_2["Channel Name"] == cname].iloc[0]
+        self.assertEqual(row_2["Collected Comments"], 4)
+        self.assertEqual(row_2["Sentiment Status"], "Analyzed (4/4)")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -185,6 +185,11 @@ def run_ai_pipeline(
         rate = done / max(time.time() - started, 1e-6)
         print(f"  analysed {done}/{len(df)} comments ({rate:.0f}/s)")
     print(f"Analysed and stored {done} comments with aspect-level sentiment.")
+    try:
+        from core import channel_manager
+        channel_manager.update_all_channel_run_coverage()
+    except Exception as exc:
+        print(f"Notice: Coverage telemetry update: {type(exc).__name__} ({exc})")
     return done
 
 

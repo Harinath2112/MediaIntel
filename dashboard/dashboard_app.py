@@ -1404,8 +1404,13 @@ with tab_system:
             ref_c1, ref_c2 = st.columns([1, 1])
             with ref_c1:
                 if st.button("🔄 Refresh Results & Reload Data", width="stretch", key="btn_refresh_results"):
-                    st.cache_data.clear()
-                    st.success("Dashboard cache cleared. Fresh data loaded.")
+                    try:
+                        channel_manager.update_all_channel_run_coverage()
+                        st.cache_data.clear()
+                        st.success("Dashboard cache cleared. Fresh data loaded.")
+                    except Exception as exc:
+                        st.error(f"Failed to refresh coverage ledger: {type(exc).__name__} ({exc})")
+                        st.cache_data.clear()
                     st.rerun()
             with ref_c2:
                 st.caption("ℹ️ Once GitHub Actions indicates 'Completed Successfully', click 'Refresh Results' to display newly analyzed videos and sentiment.")
