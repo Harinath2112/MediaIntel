@@ -289,7 +289,10 @@ def get_channel_telemetry_df():
         LEFT JOIN videos v ON v.channel_id = c.channel_id
         LEFT JOIN comments m ON m.video_id = v.video_id
         LEFT JOIN sentiment_insights s ON s.comment_id = m.comment_id
-        LEFT JOIN transcripts t ON t.video_id = v.video_id AND t.source IN ('whisper', 'captions')
+        LEFT JOIN transcripts t ON t.video_id = v.video_id 
+             AND t.source IN ('whisper', 'captions')
+             AND t.transcript_text IS NOT NULL
+             AND TRIM(t.transcript_text) != ''
         GROUP BY c.channel_id, c.channel_name, c.is_tracked
         ORDER BY c.is_tracked DESC, c.channel_name ASC
     """
@@ -793,11 +796,34 @@ def preview_channel_deletion(
         """, {"cid": cid})
         counts["aspect_sentiments"] = int(asp_df.iloc[0]["cnt"]) if not asp_df.empty else 0
 
-        t_df = config.read_sql("""
-            SELECT COUNT(*) AS cnt FROM transcripts
+        # Detailed transcript inspection: raw table rows vs completed text vs pending audio
+        tx_rows_df = config.read_sql("""
+            SELECT video_id, source, transcript_text FROM transcripts
             WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
         """, {"cid": cid})
-        counts["transcripts"] = int(t_df.iloc[0]["cnt"]) if not t_df.empty else 0
+        counts["transcripts"] = len(tx_rows_df)
+
+        completed_tx = 0
+        pending_audio_tx = 0
+        active_completed_tx = 0
+
+        if not tx_rows_df.empty:
+            is_completed = (
+                tx_rows_df["source"].fillna("").astype(str).str.lower().isin(["whisper", "captions"]) &
+                tx_rows_df["transcript_text"].notna() &
+                (tx_rows_df["transcript_text"].astype(str).str.strip() != "")
+            )
+            completed_tx = int(is_completed.sum())
+            pending_audio_tx = len(tx_rows_df) - completed_tx
+
+            # Active candidate transcripts (top 2 by view count in active 10)
+            try:
+                cand_vids_df = get_transcription_candidate_videos(2, channel_ids=[cid])
+                cand_vids = set(cand_vids_df["video_id"].tolist()) if not cand_vids_df.empty else set()
+                if cand_vids:
+                    active_completed_tx = int((is_completed & tx_rows_df["video_id"].isin(cand_vids)).sum())
+            except Exception:
+                active_completed_tx = completed_tx
 
         vaa_df = config.read_sql("""
             SELECT bucket, object_path FROM video_audio_assets
@@ -847,6 +873,9 @@ def preview_channel_deletion(
             "is_tracked": is_tracked,
             "record_counts": counts,
             "total_records": total_relational,
+            "completed_transcripts": completed_tx,
+            "pending_audio_records": pending_audio_tx,
+            "active_set_transcripts": active_completed_tx,
             "storage_audio_objects": audio_paths,
             "storage_audio_count": len(audio_paths),
             "is_locked": is_locked,
@@ -860,6 +889,9 @@ def preview_channel_deletion(
             "is_tracked": True,
             "record_counts": {},
             "total_records": 0,
+            "completed_transcripts": 0,
+            "pending_audio_records": 0,
+            "active_set_transcripts": 0,
             "storage_audio_objects": [],
             "storage_audio_count": 0,
             "is_locked": False,

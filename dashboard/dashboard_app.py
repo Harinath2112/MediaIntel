@@ -432,7 +432,8 @@ with tab_overview:
         else:
             empty_state("No video records match the current filters.")
 
-    with st.expander("🎯 View Per-Channel Coverage Ledger (Targets vs. Collected)", expanded=False):
+    with st.expander("🎯 View Per-Channel Coverage Ledger (Active Analysis Set: Targets vs. Collected)", expanded=False):
+        st.caption("Active run telemetry: Tracks the current analysis set (10 most recent videos, up to 2 transcription candidates). Historical warehouse records are preserved across runs.")
         try:
             cov_summary_df = channel_manager.get_channel_run_coverage_df()
             st.dataframe(cov_summary_df, width="stretch", hide_index=True)
@@ -1145,19 +1146,54 @@ with tab_system:
 
                     # Preview record counts
                     p_counts = del_preview.get("record_counts", {})
+                    completed_tx = del_preview.get("completed_transcripts", p_counts.get("transcripts", 0))
+                    pending_tx = del_preview.get("pending_audio_records", 0)
+                    active_tx = del_preview.get("active_set_transcripts", completed_tx)
+                    tx_help = f"Completed Transcripts: {completed_tx} (Active Set: {active_tx}/2) | Pending Audio/Unavailable Records: {pending_tx} | Total Table Rows to Purge: {p_counts.get('transcripts', 0)}"
+
                     dc1, dc2, dc3, dc4 = st.columns(4)
                     with dc1:
-                        st.metric("Videos", f"{p_counts.get('videos', 0):,}")
+                        st.metric("Videos (Warehouse)", f"{p_counts.get('videos', 0):,}")
                         st.metric("Comments", f"{p_counts.get('comments', 0):,}")
                     with dc2:
                         st.metric("Sentiment Insights", f"{p_counts.get('sentiment_insights', 0):,}")
                         st.metric("Aspect Records", f"{p_counts.get('aspect_sentiments', 0):,}")
                     with dc3:
-                        st.metric("Transcripts", f"{p_counts.get('transcripts', 0):,}")
+                        if pending_tx > 0:
+                            st.metric(
+                                "Transcripts (Completed)",
+                                f"{completed_tx:,}",
+                                delta=f"{pending_tx} audio pending",
+                                delta_color="inverse",
+                                help=tx_help,
+                            )
+                        else:
+                            st.metric(
+                                "Transcripts (Warehouse)",
+                                f"{completed_tx:,}",
+                                help=tx_help,
+                            )
                         st.metric("Audio Storage Objects", f"{del_preview.get('storage_audio_count', 0):,}")
                     with dc4:
                         st.metric("Relevance & Alerts", f"{p_counts.get('video_relevance', 0) + p_counts.get('anomaly_alerts', 0):,}")
                         st.metric("Total Dependent Records", f"{del_preview.get('total_records', 0):,}")
+
+                    with st.expander("📋 Detailed Relational Table Breakdown", expanded=False):
+                        breakdown_data = [
+                            {"Table": "channels", "Records to Purge": p_counts.get("channels", 1), "Scope / Notes": "Channel metadata"},
+                            {"Table": "videos", "Records to Purge": p_counts.get("videos", 0), "Scope / Notes": "All stored videos in warehouse"},
+                            {"Table": "comments", "Records to Purge": p_counts.get("comments", 0), "Scope / Notes": "All collected comments"},
+                            {"Table": "sentiment_insights", "Records to Purge": p_counts.get("sentiment_insights", 0), "Scope / Notes": "RoBERTa sentiment mappings"},
+                            {"Table": "aspect_sentiments", "Records to Purge": p_counts.get("aspect_sentiments", 0), "Scope / Notes": "ABSA aspect rows"},
+                            {"Table": "transcripts", "Records to Purge": p_counts.get("transcripts", 0), "Scope / Notes": f"{completed_tx} completed, {pending_tx} audio pending/unavailable"},
+                            {"Table": "video_audio_assets", "Records to Purge": p_counts.get("video_audio_assets", 0), "Scope / Notes": "Storage asset mappings"},
+                            {"Table": "video_stats_history", "Records to Purge": p_counts.get("video_stats_history", 0), "Scope / Notes": "Engagement velocity history"},
+                            {"Table": "video_relevance", "Records to Purge": p_counts.get("video_relevance", 0), "Scope / Notes": "Relevance & alignment scores"},
+                            {"Table": "anomaly_alerts", "Records to Purge": p_counts.get("anomaly_alerts", 0), "Scope / Notes": "Channel/video anomalies"},
+                            {"Table": "topic_suggestions", "Records to Purge": p_counts.get("topic_suggestions", 0), "Scope / Notes": "Channel-scoped topic suggestions"},
+                            {"Table": "channel_run_coverage", "Records to Purge": p_counts.get("channel_run_coverage", 0), "Scope / Notes": "Coverage ledger telemetry"},
+                        ]
+                        st.dataframe(pd.DataFrame(breakdown_data), width="stretch", hide_index=True)
 
                     st.warning(
                         "⚠️ **IRREVERSIBLE ACTION:** All records shown above will be permanently deleted using a single database transaction. "
@@ -1347,8 +1383,8 @@ with tab_system:
             # Section 4: Channel Ingestion Status & Coverage Table
             # -----------------------------------------------------------
             st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("##### 🎯 Per-Channel Ingestion & Transcription Coverage Ledger")
-            st.caption("Detailed breakdown of targets vs collected videos, comments, and transcripts for all tracked competitors.")
+            st.markdown("##### 🎯 Per-Channel Ingestion & Transcription Coverage Ledger (Active Analysis Set)")
+            st.caption("Detailed breakdown of active run targets vs collected videos, comments, and transcripts for the current analysis set (10 videos, 2 transcription candidates).")
             try:
                 coverage_df = channel_manager.get_channel_run_coverage_df()
                 st.dataframe(coverage_df, width="stretch", hide_index=True)
@@ -1356,7 +1392,8 @@ with tab_system:
                 st.error(f"Could not load channel coverage ledger: {type(exc).__name__}")
 
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("##### 📊 All-Time Channel Telemetry & Storage State")
+            st.markdown("##### 📊 All-Time Channel Telemetry & Storage State (All Warehouse Records)")
+            st.caption("Cumulative historical inventory across all ingestion runs in the Supabase PostgreSQL warehouse, including all videos, comments, and completed transcripts.")
             try:
                 telemetry_df = channel_manager.get_channel_telemetry_df()
                 st.dataframe(telemetry_df, width="stretch", hide_index=True)

@@ -491,7 +491,76 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Dashboard failed: {res.stderr}")
         self.assertIn("EXC 0", res.stdout)
 
+    def test_15_transcript_count_consistency_and_distinction(self):
+        """Test 15: Verify transcript count consistency between coverage ledger, telemetry, and deletion preview.
+        
+        Reproduces and resolves the discrepancy where a channel with pending/unavailable audio
+        has 2 placeholder database rows in transcripts, showing 0/2 in coverage ledger but 2 in deletion preview.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # 1. Seed UC_CODEBASICS: 2 videos, but both transcripts are audio_unavailable (0 completed, 2 placeholder rows)
+        self._seed_channel_with_full_records("UC_CB_TEST", "Codebasics Replica")
+        # Overwrite transcripts for UC_CB_TEST to simulate audio_unavailable
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM transcripts WHERE video_id LIKE 'vid_%_UC_CB_TEST'"))
+            for v_idx in [1, 2]:
+                conn.execute(text("""
+                    INSERT INTO transcripts (video_id, source, language, model_name, transcript_text, audio_seconds, word_count, last_error, updated_at)
+                    VALUES (:vid, 'audio_unavailable', 'und', 'whisper-tiny', NULL, 0, 0, 'Audio unavailable in Supabase Storage', :now)
+                """), {"vid": f"vid_{v_idx}_UC_CB_TEST", "now": now})
+
+        # 2. Seed UC_APNA_TEST: 2 videos, both transcripts completed (whisper)
+        self._seed_channel_with_full_records("UC_APNA_TEST", "Apna College Replica")
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM transcripts WHERE video_id LIKE 'vid_%_UC_APNA_TEST'"))
+            for v_idx in [1, 2]:
+                conn.execute(text("""
+                    INSERT INTO transcripts (video_id, source, language, model_name, transcript_text, audio_seconds, word_count, updated_at)
+                    VALUES (:vid, 'whisper', 'en', 'whisper-tiny', 'Valid completed transcript text', 120, 25, :now)
+                """), {"vid": f"vid_{v_idx}_UC_APNA_TEST", "now": now})
+
+        # 3. Update coverage ledger (Active Analysis Set)
+        channel_manager.update_all_channel_run_coverage(video_limit=2)
+        coverage_df = channel_manager.get_channel_run_coverage_df()
+
+        # Verify Codebasics in Coverage Ledger: 0/2 completed transcripts, status Audio Pending
+        cb_cov = coverage_df[coverage_df["Channel Name"] == "Codebasics Replica"].iloc[0]
+        self.assertEqual(cb_cov["Transcription Candidates"], 2)
+        self.assertEqual(cb_cov["Completed Transcripts"], 0)
+        self.assertEqual(cb_cov["Transcription Status"], "Audio Pending (0/2)")
+
+        # Verify Apna in Coverage Ledger: 2/2 completed transcripts, status Completed
+        apna_cov = coverage_df[coverage_df["Channel Name"] == "Apna College Replica"].iloc[0]
+        self.assertEqual(apna_cov["Transcription Candidates"], 2)
+        self.assertEqual(apna_cov["Completed Transcripts"], 2)
+        self.assertEqual(apna_cov["Transcription Status"], "Completed (2/2)")
+
+        # 4. Verify All-Time Channel Telemetry
+        telemetry_df = channel_manager.get_channel_telemetry_df()
+        cb_telem = telemetry_df[telemetry_df["Channel"] == "Codebasics Replica"].iloc[0]
+        apna_telem = telemetry_df[telemetry_df["Channel"] == "Apna College Replica"].iloc[0]
+        # Telemetry only counts completed transcripts (non-empty text, source whisper/captions)
+        self.assertEqual(cb_telem["Transcripts"], 0)
+        self.assertEqual(apna_telem["Transcripts"], 2)
+
+        # 5. Verify Permanent Deletion Preview
+        cb_prev = channel_manager.preview_channel_deletion("UC_CB_TEST")
+        # Physical table rows to be purged must be 2
+        self.assertEqual(cb_prev["record_counts"]["transcripts"], 2)
+        # Granular completed vs pending breakdown
+        self.assertEqual(cb_prev["completed_transcripts"], 0)
+        self.assertEqual(cb_prev["pending_audio_records"], 2)
+        self.assertEqual(cb_prev["active_set_transcripts"], 0)
+
+        apna_prev = channel_manager.preview_channel_deletion("UC_APNA_TEST")
+        self.assertEqual(apna_prev["record_counts"]["transcripts"], 2)
+        self.assertEqual(apna_prev["completed_transcripts"], 2)
+        self.assertEqual(apna_prev["pending_audio_records"], 0)
+        self.assertEqual(apna_prev["active_set_transcripts"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
