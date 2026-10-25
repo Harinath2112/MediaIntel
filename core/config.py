@@ -7,13 +7,22 @@
 """
 from __future__ import annotations
 
+import atexit
 import os
+import sqlite3
 import sys
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Register SQLite datetime adapters to eliminate Python 3.12+ DeprecationWarnings
+try:
+    sqlite3.register_adapter(datetime, lambda dt: dt.isoformat(" "))
+    sqlite3.register_adapter(date, lambda d: d.isoformat())
+except Exception:
+    pass
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
@@ -222,6 +231,21 @@ def get_engine():
         else:
             _engine = create_engine(url, pool_pre_ping=True, pool_recycle=1800)
     return _engine
+
+
+def dispose_engine() -> None:
+    """Explicitly dispose the shared SQLAlchemy engine, closing all pooled connections cleanly."""
+    global _engine
+    if _engine is not None:
+        try:
+            _engine.dispose()
+        except Exception:
+            pass
+        _engine = None
+
+
+# Ensure any open connection pool is cleanly closed before process termination
+atexit.register(dispose_engine)
 
 
 def is_sqlite() -> bool:

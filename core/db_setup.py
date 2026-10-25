@@ -228,9 +228,21 @@ def _quarantine_incompatible_sqlite() -> str | None:
         return None
     import sqlite3
     try:
-        with sqlite3.connect(path) as c:
-            tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            cols = {r[1] for r in c.execute("PRAGMA table_info(channels)")} if "channels" in tables else set()
+        c = sqlite3.connect(path)
+        try:
+            cur = c.cursor()
+            try:
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = {r[0] for r in cur.fetchall()}
+                if "channels" in tables:
+                    cur.execute("PRAGMA table_info(channels)")
+                    cols = {r[1] for r in cur.fetchall()}
+                else:
+                    cols = set()
+            finally:
+                cur.close()
+        finally:
+            c.close()
     except sqlite3.DatabaseError:
         return None
     if "channels" not in tables or "channel_name" in cols:

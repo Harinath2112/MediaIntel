@@ -38,6 +38,7 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         config.get_engine = cls._orig_get_engine
+        cls.engine.dispose()
 
     def setUp(self):
         # Clean all tables before each test

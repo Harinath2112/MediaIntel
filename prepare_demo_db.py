@@ -17,24 +17,36 @@ DESTINATION.parent.mkdir(
     exist_ok=True
 )
 
-with sqlite3.connect(str(SOURCE)) as source:
-    with sqlite3.connect(str(DESTINATION)) as target:
-        source.backup(target)
+source = sqlite3.connect(str(SOURCE))
+target = sqlite3.connect(str(DESTINATION))
+try:
+    source.backup(target)
+finally:
+    source.close()
+    target.close()
 
-with sqlite3.connect(str(DESTINATION)) as db:
-    result = db.execute(
-        "PRAGMA integrity_check"
-    ).fetchone()[0]
+db = sqlite3.connect(str(DESTINATION))
+try:
+    cur = db.cursor()
+    try:
+        cur.execute("PRAGMA integrity_check")
+        row = cur.fetchone()
+        result = row[0] if row else "failed"
 
-    if result != "ok":
-        raise RuntimeError(
-            f"Database integrity check failed: {result}"
+        if result != "ok":
+            raise RuntimeError(
+                f"Database integrity check failed: {result}"
+            )
+
+        cur.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
-
-    tables = db.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
+        tables = cur.fetchall()
+    finally:
+        cur.close()
+finally:
+    db.close()
 
 print("Demo database created successfully!")
 print(f"Location: {DESTINATION}")

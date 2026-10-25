@@ -60,9 +60,14 @@ def run_pipeline(env: dict) -> subprocess.CompletedProcess:
 
 def count(db: Path, sql: str) -> int:
     conn = sqlite3.connect(db, timeout=10)
-
     try:
-        return int(conn.execute(sql).fetchone()[0])
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            cur.close()
     finally:
         conn.close()
 
@@ -75,18 +80,18 @@ def release_test_database(db: Path) -> None:
         return
 
     conn = sqlite3.connect(db, timeout=5)
-
     try:
-        result = conn.execute(
-            "PRAGMA wal_checkpoint(TRUNCATE)"
-        ).fetchone()
-
-        if result is not None and result[0] != 0:
-            print(
-                "WARNING: SQLite checkpoint is busy; "
-                "another connection may still be active."
-            )
-
+        cur = conn.cursor()
+        try:
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            result = cur.fetchone()
+            if result is not None and result[0] != 0:
+                print(
+                    "WARNING: SQLite checkpoint is busy; "
+                    "another connection may still be active."
+                )
+        finally:
+            cur.close()
     finally:
         conn.close()
 
@@ -382,40 +387,42 @@ def main() -> int:
         # --------------------------------------------------
 
         # Insert a synthetic alert for dashboard testing.
-
         conn = sqlite3.connect(db, timeout=10)
-
         try:
-            vid, ch = conn.execute(
-                "SELECT video_id, channel_id "
-                "FROM videos LIMIT 1"
-            ).fetchone()
-
-            conn.execute(
-                """
-                INSERT INTO anomaly_alerts
-                (
-                    video_id,
-                    channel_id,
-                    metric,
-                    velocity,
-                    baseline,
-                    ratio,
-                    severity,
-                    detected_at,
-                    emailed
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT video_id, channel_id "
+                    "FROM videos LIMIT 1"
                 )
-                VALUES
-                (
-                    ?, ?, 'views', 1200, 100, 12,
-                    'CRITICAL', datetime('now'), 0
-                )
-                """,
-                (vid, ch),
-            )
-
-            conn.commit()
-
+                row = cur.fetchone()
+                if row:
+                    vid, ch = row
+                    cur.execute(
+                        """
+                        INSERT INTO anomaly_alerts
+                        (
+                            video_id,
+                            channel_id,
+                            metric,
+                            velocity,
+                            baseline,
+                            ratio,
+                            severity,
+                            detected_at,
+                            emailed
+                        )
+                        VALUES
+                        (
+                            ?, ?, 'views', 1200, 100, 12,
+                            'CRITICAL', datetime('now'), 0
+                        )
+                        """,
+                        (vid, ch),
+                    )
+                    conn.commit()
+            finally:
+                cur.close()
         finally:
             conn.close()
 
@@ -434,6 +441,8 @@ def main() -> int:
             "print('CSS_OK', bool(css) and "
             "all('{{' not in c and '}}' not in c "
             "for c in css))\n"
+            "from core import config\n"
+            "config.dispose_engine()\n"
         )
 
         r3 = subprocess.run(
