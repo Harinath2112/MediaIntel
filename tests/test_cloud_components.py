@@ -134,6 +134,58 @@ def test_admin_authentication_digest():
     )
 
 
+def test_cloud_workflow_rpa_job_configuration():
+    wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "mediaintel-cloud-pipeline.yml"
+    assert wf_path.is_file(), "mediaintel-cloud-pipeline.yml must exist"
+
+    content = wf_path.read_text(encoding="utf-8")
+    # Verify no scheduled cron triggers exist
+    assert "cron:" not in content
+    assert "schedule:" not in content
+
+    # Verify workflow_dispatch and new inputs
+    assert "workflow_dispatch:" in content
+    assert "run_rpa:" in content
+    assert "send_email:" in content
+    assert "default: false" in content  # send_email must be false by default
+
+    # Verify rpa-reporting job and dependencies
+    assert "rpa-reporting:" in content
+    assert "requirements-rpa.txt" in content
+    assert "actions/upload-artifact@v4" in content
+    assert "MediaIntel_Dashboard_Documentation.pdf" in content
+    assert "Content_Strategy_Report.txt" in content
+    assert "AlertSummary.txt" in content
+
+
+def test_rpa_dry_run_safety_and_audit():
+    import rpa.MediaIntelRPA as rpa_module
+    bot = rpa_module.MediaIntelRPA()
+
+    # Verify dry-run mode returns DRY_RUN and writes audit .eml
+    os.environ["RPA_DRY_RUN"] = "1"
+    try:
+        sample_mail = {
+            "subject": "[TEST] MediaIntel Anomaly Signals",
+            "text": "Sample text body for unit test",
+            "html": "<p>Sample html body</p>",
+            "alerts": 1,
+            "new_alerts": 1,
+        }
+        res = bot.send_email_with_attachments(sample_mail)
+        assert res == "DRY_RUN", f"Expected DRY_RUN, got {res}"
+
+        # Verify marking alerts emailed in DRY_RUN returns 0 and does not touch database
+        closed = bot.mark_alerts_emailed(res)
+        assert closed == 0, "mark_alerts_emailed must be 0 for DRY_RUN"
+
+        # Verify dispatch_result.json was generated with DRY_RUN status
+        result_json = config.RPA_LOG_DIR / "dispatch_result.json"
+        assert result_json.is_file(), "dispatch_result.json must be written"
+    finally:
+        os.environ.pop("RPA_DRY_RUN", None)
+
+
 if __name__ == "__main__":
     test_video_id_regex()
     test_audio_header_validation()
@@ -141,4 +193,6 @@ if __name__ == "__main__":
     test_database_url_normalization()
     test_channel_id_validation_logic()
     test_admin_authentication_digest()
+    test_cloud_workflow_rpa_job_configuration()
+    test_rpa_dry_run_safety_and_audit()
     print("ALL CLOUD COMPONENT TESTS PASSED!")

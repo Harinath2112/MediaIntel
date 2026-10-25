@@ -1308,6 +1308,12 @@ with tab_system:
                     help="0 analyzes all pending comments incrementally across all channels without truncation."
                 )
 
+            cb_rpa_col1, cb_rpa_col2 = st.columns([1, 1])
+            with cb_rpa_col1:
+                run_rpa_opt = st.checkbox("Generate RPA Reports (PDF + Strategy + Alerts)", value=True, key="cb_run_rpa")
+            with cb_rpa_col2:
+                send_email_opt = st.checkbox("Send Email Alerts via SMTP (Requires Secrets)", value=False, key="cb_send_email")
+
             btn_run_analysis = st.button("🚀 Run Full Analysis", type="primary", width="stretch", key="btn_run_full_analysis")
 
             if btn_run_analysis:
@@ -1325,6 +1331,8 @@ with tab_system:
                             transcripts_per_channel=2,
                             sentiment_limit=s_limit,
                             run_whisper=True,
+                            run_rpa=run_rpa_opt,
+                            send_email=send_email_opt,
                             force=False,
                         )
                         if dispatch_res["success"]:

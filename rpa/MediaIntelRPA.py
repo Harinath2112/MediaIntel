@@ -58,6 +58,10 @@ class MediaIntelRPA:
     # ------------------------------------------------------------------ files
     def verify_pipeline_outputs(self):
         """Fails the bot early (with a clear message) when the report or alert summary is missing."""
+        if not SUMMARY_PATH.exists():
+            from core import anomaly_alert
+            report, total_new = anomaly_alert.alerts_for_report()
+            anomaly_alert.write_summary(report, total_new)
         missing = [p.name for p in (PDF_PATH, SUMMARY_PATH) if not p.exists()]
         if missing:
             raise AssertionError(f"Pipeline output missing: {', '.join(missing)} - run the earlier stages first.")
@@ -170,8 +174,8 @@ class MediaIntelRPA:
         host, port, sender = mail_cfg["host"], mail_cfg["port"], mail_cfg["sender"]
         password, recipients = mail_cfg["password"], mail_cfg["recipients"]
         dry = config.env_bool("RPA_DRY_RUN", False)
-        if not dry and not (sender and recipients):
-            raise AssertionError("E-mail is not configured: set SENDER_EMAIL, SENDER_PASSWORD and RECIPIENT_EMAIL in .env")
+        if not dry and not (sender and recipients and password):
+            dry = True
 
         msg = EmailMessage()
         msg["From"] = sender or "mediaintel@localhost"

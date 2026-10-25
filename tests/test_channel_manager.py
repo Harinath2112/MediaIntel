@@ -103,9 +103,19 @@ UCBwmMxybNva6P_5VmxjzwqA"""
             channel_ids="UC111,UC222",
             video_limit=5,
             sentiment_limit=100,
+            run_rpa=True,
+            send_email=False,
         )
         self.assertTrue(res["success"])
         self.assertEqual(res["status_code"], 204)
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["json"]
+        self.assertEqual(payload["inputs"]["run_rpa"], True)
+        self.assertEqual(payload["inputs"]["send_email"], False)
+        self.assertEqual(payload["inputs"]["run_ingestion"], True)
+        self.assertEqual(payload["inputs"]["run_ai"], True)
+        self.assertEqual(payload["inputs"]["channel_id"], "UC111,UC222")
 
 
 if __name__ == "__main__":

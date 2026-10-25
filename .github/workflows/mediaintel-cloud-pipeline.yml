@@ -21,6 +21,16 @@ on:
         required: true
         type: boolean
         default: true
+      run_rpa:
+        description: 'Run RPA report generation and artifact publishing'
+        required: true
+        type: boolean
+        default: true
+      send_email:
+        description: 'Send email alerts via SMTP (requires SMTP secrets)'
+        required: false
+        type: boolean
+        default: false
       channel_id:
         description: 'Specific YouTube Channel ID(s) to process (comma-separated, or empty for all enabled)'
         required: false
@@ -212,3 +222,75 @@ jobs:
         run: |
           TRANS_LIMIT="${INPUT_TRANSCRIPTS_PER_CHANNEL:-2}"
           python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 600
+
+  rpa-reporting:
+    name: Cloud RPA & Intelligence Reporting
+    needs: [ingest-youtube, ai-analytics, whisper-transcription]
+    if: |
+      always() &&
+      (inputs.run_rpa == true || inputs.run_rpa == 'true') &&
+      (needs.ingest-youtube.result == 'success' || needs.ingest-youtube.result == 'skipped') &&
+      (needs.ai-analytics.result == 'success' || needs.ai-analytics.result == 'skipped') &&
+      (needs.whisper-transcription.result == 'success' || needs.whisper-transcription.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-rpa.txt
+
+      - name: Install RPA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-rpa.txt
+
+      - name: Verify database secret
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          test -n "$MEDIAINTEL_DB_URL" || { echo "Missing MEDIAINTEL_DB_URL"; exit 1; }
+          echo "Database configuration verified for RPA reporting."
+
+      - name: Prepare alert summary from database
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+        run: |
+          python -c "from core import anomaly_alert; r, t = anomaly_alert.alerts_for_report(); anomaly_alert.write_summary(r, t)"
+
+      - name: Run Robot Framework RPA Suite
+        env:
+          MEDIAINTEL_DB_URL: ${{ secrets.MEDIAINTEL_DB_URL }}
+          RPA_DRY_RUN: ${{ (inputs.send_email == true || inputs.send_email == 'true') && '0' || '1' }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_RECIPIENT: ${{ secrets.ALERT_RECIPIENT }}
+          EMAIL_MODE: ${{ secrets.EMAIL_MODE || 'always' }}
+        run: |
+          python -m robot --rpa --outputdir data/rpa_logs --pythonpath rpa --output rpa_output.xml --log rpa_log.html --report rpa_report.html rpa/mediaintel_rpa.robot
+
+      - name: Upload RPA and Intelligence Report Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaintel-reports-${{ github.run_id }}
+          path: |
+            outputs/MediaIntel_Dashboard_Documentation.pdf
+            outputs/Content_Strategy_Report.txt
+            outputs/AlertSummary.txt
+            outputs/archive/*.pdf
+            data/rpa_logs/rpa_report.html
+            data/rpa_logs/rpa_log.html
+            data/rpa_logs/dispatch_result.json
+            data/rpa_logs/outbox/*.eml
+          if-no-files-found: warn
+          retention-days: 14
+

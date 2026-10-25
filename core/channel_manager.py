@@ -626,6 +626,8 @@ def dispatch_cloud_pipeline(
     transcripts_per_channel: int = 2,
     sentiment_limit: int = 0,
     run_whisper: bool = True,
+    run_rpa: bool = True,
+    send_email: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     """Dispatch the GitHub Actions cloud pipeline with deduplication protection."""
@@ -663,6 +665,8 @@ def dispatch_cloud_pipeline(
             "run_ingestion": True,
             "run_ai": True,
             "run_whisper": bool(run_whisper),
+            "run_rpa": bool(run_rpa),
+            "send_email": bool(send_email),
             "channel_id": channel_id_param,
             "video_limit": str(video_limit),
             "comments_per_video": str(comments_per_video),

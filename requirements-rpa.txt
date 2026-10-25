@@ -1,0 +1,16 @@
+# MediaIntel - GitHub Actions RPA reporting and alert dispatch dependencies
+# Python 3.12, lightweight runner (no PyTorch / Faster-Whisper required)
+
+# Database access (Supabase PostgreSQL / SQLite)
+SQLAlchemy>=2.0.30,<3
+psycopg[binary]>=3.2,<4
+python-dotenv>=1.0,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# Visualizations & PDF Report generation
+matplotlib>=3.9
+reportlab>=4.2
+
+# Robotic Process Automation (Robot Framework)
+robotframework>=7.0
