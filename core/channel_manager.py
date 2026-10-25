@@ -30,6 +30,7 @@ __all__ = [
     "get_latest_workflow_runs",
     "get_workflow_run_jobs",
     "dispatch_cloud_pipeline",
+    "dispatch_rpa_reporting",
     "check_channel_concurrency",
     "preview_channel_deletion",
     "delete_channel_permanently",
@@ -629,6 +630,8 @@ def dispatch_cloud_pipeline(
     run_rpa: bool = True,
     send_email: bool = False,
     force: bool = False,
+    run_ingestion: bool = True,
+    run_ai: bool = True,
 ) -> dict[str, Any]:
     """Dispatch the GitHub Actions cloud pipeline with deduplication protection."""
     if not gh_token:
@@ -662,8 +665,8 @@ def dispatch_cloud_pipeline(
     payload = {
         "ref": ref,
         "inputs": {
-            "run_ingestion": True,
-            "run_ai": True,
+            "run_ingestion": bool(run_ingestion),
+            "run_ai": bool(run_ai),
             "run_whisper": bool(run_whisper),
             "run_rpa": bool(run_rpa),
             "send_email": bool(send_email),
@@ -703,6 +706,34 @@ def dispatch_cloud_pipeline(
             "status_code": 500,
             "message": f"Failed to dispatch workflow: {type(exc).__name__}",
         }
+
+
+def dispatch_rpa_reporting(
+    gh_token: str,
+    gh_repo: str = "Harinath2112/MediaIntel",
+    workflow_file: str = "mediaintel-cloud-pipeline.yml",
+    ref: str = "main",
+    send_email: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Dispatch standalone Cloud RPA report generation (and optional alert email).
+
+    Generates the 8-page PDF report, strategy report, and alert summary directly from
+    the latest committed Supabase PostgreSQL records, skipping YouTube ingestion,
+    RoBERTa sentiment analysis, and Whisper transcription.
+    """
+    return dispatch_cloud_pipeline(
+        gh_token=gh_token,
+        gh_repo=gh_repo,
+        workflow_file=workflow_file,
+        ref=ref,
+        run_ingestion=False,
+        run_ai=False,
+        run_whisper=False,
+        run_rpa=True,
+        send_email=send_email,
+        force=force,
+    )
 
 
 def check_channel_concurrency(

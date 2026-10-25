@@ -1157,31 +1157,34 @@ with tab_system:
                     active_tx = del_preview.get("active_set_transcripts", completed_tx)
                     tx_help = f"Completed Transcripts: {completed_tx} (Active Set: {active_tx}/2) | Pending Audio/Unavailable Records: {pending_tx} | Total Table Rows to Purge: {p_counts.get('transcripts', 0)}"
 
-                    dc1, dc2, dc3, dc4 = st.columns(4)
-                    with dc1:
-                        st.metric("Videos (Warehouse)", f"{p_counts.get('videos', 0):,}")
+                    dm1, dm2, dm3, dm4, dm5 = st.columns(5)
+                    with dm1:
+                        st.metric("Videos", f"{p_counts.get('videos', 0):,}")
+                        st.metric("Relevance Records", f"{p_counts.get('video_relevance', 0):,}")
+                    with dm2:
                         st.metric("Comments", f"{p_counts.get('comments', 0):,}")
-                    with dc2:
+                        st.metric("Topic Suggestions", f"{p_counts.get('topic_suggestions', 0):,}")
+                    with dm3:
                         st.metric("Sentiment Insights", f"{p_counts.get('sentiment_insights', 0):,}")
-                        st.metric("Aspect Records", f"{p_counts.get('aspect_sentiments', 0):,}")
-                    with dc3:
+                        st.metric("Anomaly Records", f"{p_counts.get('anomaly_alerts', 0):,}")
+                    with dm4:
+                        st.metric("Aspect Records (ABSA)", f"{p_counts.get('aspect_sentiments', 0):,}")
+                        st.metric("Audio Storage Objects", f"{del_preview.get('storage_audio_count', 0):,}")
+                    with dm5:
                         if pending_tx > 0:
                             st.metric(
-                                "Transcripts (Completed)",
+                                "Transcripts",
                                 f"{completed_tx:,}",
-                                delta=f"{pending_tx} audio pending",
+                                delta=f"{pending_tx} pending",
                                 delta_color="inverse",
                                 help=tx_help,
                             )
                         else:
                             st.metric(
-                                "Transcripts (Warehouse)",
+                                "Transcripts",
                                 f"{completed_tx:,}",
                                 help=tx_help,
                             )
-                        st.metric("Audio Storage Objects", f"{del_preview.get('storage_audio_count', 0):,}")
-                    with dc4:
-                        st.metric("Relevance & Alerts", f"{p_counts.get('video_relevance', 0) + p_counts.get('anomaly_alerts', 0):,}")
                         st.metric("Total Dependent Records", f"{del_preview.get('total_records', 0):,}")
 
                     with st.expander("📋 Detailed Relational Table Breakdown", expanded=False):
@@ -1345,6 +1348,88 @@ with tab_system:
                             st.warning(f"⚠️ {dispatch_res['message']} [Click here to view the active run in GitHub Actions]({run_url}).")
                         else:
                             st.error(f"❌ {dispatch_res['message']}")
+
+            # -----------------------------------------------------------
+            # Section 2.5: Administrator PDF Report & Alert Email Dispatcher
+            # -----------------------------------------------------------
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("##### 📑 Executive PDF & Alert Email Dispatcher")
+            st.caption(
+                "Generate the 8-page executive documentation PDF, content strategy report, and alert summary "
+                "directly from latest committed Supabase PostgreSQL records, with optional real SMTP alert delivery."
+            )
+
+            # Safely resolve configured recipient without exposing SMTP passwords or secrets
+            configured_recipient = (
+                config.env("ALERT_RECIPIENT")
+                or config.env("RECIPIENT_EMAIL")
+            )
+            if not configured_recipient:
+                try:
+                    configured_recipient = st.secrets.get("ALERT_RECIPIENT") or st.secrets.get("RECIPIENT_EMAIL")
+                except Exception:
+                    pass
+            if not configured_recipient:
+                mail_recips = config.mail_settings().get("recipients", [])
+                if mail_recips:
+                    configured_recipient = ", ".join(mail_recips)
+            recipient_display = configured_recipient or "Configured via GitHub Secret: ALERT_RECIPIENT"
+
+            st.markdown(f"📧 **Configured Alert Recipient:** `{recipient_display}`")
+
+            confirm_rpa_email = st.checkbox(
+                f"Send real alert email to '{recipient_display}' (Requires valid SMTP secrets in GitHub Actions)",
+                value=False,
+                key="cb_confirm_live_email",
+                help="When unchecked, the cloud RPA job executes in dry-run mode, publishing downloadable PDF and text report artifacts to GitHub Actions without sending live email."
+            )
+
+            if confirm_rpa_email:
+                st.info(f"ℹ️ **Live Email Delivery Active:** PDF documentation and AlertSummary.txt will be dispatched via SMTP to `{recipient_display}`.")
+            else:
+                st.caption("ℹ️ **Safe Dry-Run Mode Active:** PDF, strategy, and alert summary artifacts will be published to GitHub Actions. No live email will be sent.")
+
+            btn_generate_pdf_email = st.button(
+                "📑 Generate PDF & Send Alert Email",
+                type="primary",
+                width="stretch",
+                key="btn_generate_pdf_email"
+            )
+
+            if btn_generate_pdf_email:
+                if not st.session_state.get("admin_authenticated", False):
+                    st.error("Unauthorized: Administrator sign-in is required.")
+                    st.stop()
+
+                if not gh_token:
+                    st.error("⚠️ GitHub personal access token (`GITHUB_TOKEN`) is not configured. Please add `GITHUB_TOKEN = 'ghp_...'` in Streamlit Secrets or environment variables to dispatch workflows.")
+                else:
+                    now_time = datetime.now()
+                    last_dispatch = st.session_state.get("last_rpa_dispatch_ts")
+                    if last_dispatch and (now_time - last_dispatch).total_seconds() < 15:
+                        st.warning("⚠️ RPA report generation was just requested. Please wait a few seconds before dispatching again.")
+                    else:
+                        with st.spinner("Dispatching standalone RPA report generation to GitHub Actions..."):
+                            dispatch_res = channel_manager.dispatch_rpa_reporting(
+                                gh_token=gh_token,
+                                gh_repo=gh_repo,
+                                ref=branch_ref,
+                                send_email=confirm_rpa_email,
+                                force=False,
+                            )
+                            if dispatch_res["success"]:
+                                st.session_state["last_rpa_dispatch_ts"] = now_time
+                                st.session_state["pipeline_dispatched"] = True
+                                st.session_state["pipeline_dispatched_at"] = now_time.strftime("%H:%M:%S")
+                                mode_text = f"with live SMTP email dispatch to {recipient_display}" if confirm_rpa_email else "(Dry-Run: PDF and text artifacts published without sending email)"
+                                st.success(f"✅ RPA report generation queued in GitHub Actions {mode_text}!")
+                                st.rerun()
+                            elif dispatch_res.get("status_code") == 409:
+                                active_r = dispatch_res.get("active_run", {})
+                                run_url = active_r.get("html_url", f"https://github.com/{gh_repo}/actions")
+                                st.warning(f"⚠️ {dispatch_res['message']} [Click here to view active run #{active_r.get('id')} in GitHub Actions]({run_url}).")
+                            else:
+                                st.error(f"❌ {dispatch_res['message']}")
 
             # -----------------------------------------------------------
             # Section 3: Live Processing Progress & Job Telemetry

@@ -178,7 +178,16 @@ class MediaIntelRPA:
         password, recipients = mail_cfg["password"], mail_cfg["recipients"]
         dry = config.env_bool("RPA_DRY_RUN", False)
         if not dry and not (sender and recipients and password):
-            dry = True
+            missing = []
+            if not sender:
+                missing.append("SENDER_EMAIL / SMTP_USER")
+            if not recipients:
+                missing.append("RECIPIENT_EMAIL / ALERT_RECIPIENT")
+            if not password:
+                missing.append("SENDER_PASSWORD / SMTP_PASSWORD")
+            msg_err = f"Live SMTP delivery requested, but required credentials are missing: {', '.join(missing)}. Configure these secrets in GitHub Secrets."
+            self._result(mail, "FAILED", note=msg_err)
+            raise AssertionError(msg_err)
 
         msg = EmailMessage()
         msg["From"] = sender or "mediaintel@localhost"
