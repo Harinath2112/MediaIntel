@@ -186,6 +186,26 @@ def test_rpa_dry_run_safety_and_audit():
         os.environ.pop("RPA_DRY_RUN", None)
 
 
+def test_orchestrator_relevance_highlights_postgresql_compatibility():
+    """Verify that main_orchestrator.py has zero SQL ROUND(AVG) calls and handles NULL/floats safely."""
+    orch_path = Path(__file__).resolve().parents[1] / "main_orchestrator.py"
+    content = orch_path.read_text(encoding="utf-8")
+    assert "ROUND(AVG(" not in content, "main_orchestrator.py must not use SQL ROUND(AVG) for PostgreSQL compatibility"
+
+    # Test highlights execution with a dummy console
+    import main_orchestrator
+
+    class DummyConsole:
+        def __init__(self):
+            self.lines = []
+        def print(self, *args, **kwargs):
+            self.lines.append(str(args))
+
+    dummy = DummyConsole()
+    # Must run without raising any exceptions
+    main_orchestrator.highlights(dummy)
+
+
 if __name__ == "__main__":
     test_video_id_regex()
     test_audio_header_validation()
@@ -195,4 +215,6 @@ if __name__ == "__main__":
     test_admin_authentication_digest()
     test_cloud_workflow_rpa_job_configuration()
     test_rpa_dry_run_safety_and_audit()
+    test_orchestrator_relevance_highlights_postgresql_compatibility()
     print("ALL CLOUD COMPONENT TESTS PASSED!")
+

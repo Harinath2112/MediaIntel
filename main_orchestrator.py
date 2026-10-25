@@ -257,13 +257,15 @@ def highlights(console):
     """Short result summary printed when everything is done."""
     try:
         from core import config
+        import pandas as pd
         topics = config.read_sql("SELECT topic, score FROM topic_suggestions WHERE scope = 'ALL' ORDER BY rank_no LIMIT 3")
         pend = int(config.read_sql("SELECT COUNT(*) AS n FROM anomaly_alerts a JOIN channels c ON c.channel_id = a.channel_id WHERE a.emailed = 0 AND c.is_tracked = TRUE").iloc[0, 0])
-        rel = config.read_sql("SELECT ROUND(AVG(r.relevance_index),0) AS r FROM video_relevance r JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE").iloc[0, 0]
+        rel_row = config.read_sql("SELECT AVG(r.relevance_index) AS r FROM video_relevance r JOIN videos v ON v.video_id = r.video_id JOIN channels c ON c.channel_id = v.channel_id WHERE c.is_tracked = TRUE")
+        rel = rel_row.iloc[0, 0] if not rel_row.empty else None
         if len(topics):
             console.print("[bold]Next-video ideas:[/] " + "  ·  ".join(f"{i}. {t.topic}" for i, t in enumerate(topics.itertuples(), 1)))
-        if rel == rel and rel is not None:
-            console.print(f"[bold]Avg content relevance:[/] {int(rel)}/100")
+        if rel is not None and pd.notna(rel):
+            console.print(f"[bold]Avg content relevance:[/] {int(round(float(rel)))}/100")
         if pend:
             console.print(f"[yellow]{pend} anomaly alert(s) still waiting to be e-mailed (see data/rpa_logs).[/]")
     except Exception:
