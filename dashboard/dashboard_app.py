@@ -1004,11 +1004,19 @@ with tab_system:
 
             st.markdown("<hr>", unsafe_allow_html=True)
 
-            st.markdown("<hr>", unsafe_allow_html=True)
+            gh_repo = config.env("GITHUB_REPOSITORY") or "Harinath2112/MediaIntel"
+            gh_token = config.env("GITHUB_TOKEN") or config.env("GH_PAT")
+            if not gh_token:
+                try:
+                    gh_token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GH_PAT")
+                except Exception:
+                    pass
 
             # -----------------------------------------------------------
             # Section 1: Channel Onboarding & Tracking Controls
             # -----------------------------------------------------------
+            all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY is_tracked DESC, channel_name ASC")
+
             col_onboard, col_tracking = st.columns([3, 2])
 
             with col_onboard:
@@ -1073,7 +1081,6 @@ with tab_system:
 
             with col_tracking:
                 st.markdown("##### 🔀 Channel Tracking Controls")
-                all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY is_tracked DESC, channel_name ASC")
                 if not all_channels_df.empty:
                     channel_map = {
                         f"{r.channel_name} ({'Tracked' if r.is_tracked else 'Untracked'})": (r.channel_id, bool(r.is_tracked))
@@ -1095,6 +1102,100 @@ with tab_system:
                 else:
                     st.info("No channels in database yet.")
 
+            # Section 1.5: Permanent Channel Deletion (Danger Zone - Admin Only)
+            if not all_channels_df.empty:
+                st.markdown("<br>", unsafe_allow_html=True)
+                with st.expander("⚠️ Danger Zone: Delete Channel Permanently", expanded=False):
+                    st.markdown("##### 🗑️ Delete Channel Permanently")
+                    st.caption("Permanently purge a competitor channel and all its dependent videos, comments, RoBERTa sentiment scores, transcripts, and storage assets from the database.")
+
+                    del_channel_map = {
+                        f"{r.channel_name} (ID: {r.channel_id})": (r.channel_id, r.channel_name)
+                        for r in all_channels_df.itertuples()
+                    }
+                    sel_del_label = st.selectbox(
+                        "Select Channel to Delete",
+                        list(del_channel_map.keys()),
+                        key="del_sel_ch",
+                        help="Choose the competitor channel you wish to permanently purge."
+                    )
+                    del_cid, del_cname = del_channel_map[sel_del_label]
+
+                    # Concurrency check & preview
+                    del_preview = channel_manager.preview_channel_deletion(del_cid, gh_token=gh_token)
+
+                    st.markdown(f"**Target Channel:** `{del_cname}` &nbsp;&nbsp;|&nbsp;&nbsp; **YouTube Channel ID:** `{del_cid}`")
+
+                    # Preview record counts
+                    p_counts = del_preview.get("record_counts", {})
+                    dc1, dc2, dc3, dc4 = st.columns(4)
+                    with dc1:
+                        st.metric("Videos", f"{p_counts.get('videos', 0):,}")
+                        st.metric("Comments", f"{p_counts.get('comments', 0):,}")
+                    with dc2:
+                        st.metric("Sentiment Insights", f"{p_counts.get('sentiment_insights', 0):,}")
+                        st.metric("Aspect Records", f"{p_counts.get('aspect_sentiments', 0):,}")
+                    with dc3:
+                        st.metric("Transcripts", f"{p_counts.get('transcripts', 0):,}")
+                        st.metric("Audio Storage Objects", f"{del_preview.get('storage_audio_count', 0):,}")
+                    with dc4:
+                        st.metric("Relevance & Alerts", f"{p_counts.get('video_relevance', 0) + p_counts.get('anomaly_alerts', 0):,}")
+                        st.metric("Total Dependent Records", f"{del_preview.get('total_records', 0):,}")
+
+                    st.warning(
+                        "⚠️ **IRREVERSIBLE ACTION:** All records shown above will be permanently deleted using a single database transaction. "
+                        "Shared global topics (`scope='all'`) and other tracked channels will not be touched."
+                    )
+
+                    if del_preview.get("is_locked"):
+                        st.error(f"🚫 **Deletion is temporarily blocked:** {del_preview.get('lock_reason')}")
+
+                    del_confirm_input = st.text_input(
+                        "To confirm permanent deletion, type DELETE in uppercase:",
+                        placeholder="DELETE",
+                        key="del_confirm_text_input"
+                    )
+
+                    btn_del_perm = st.button(
+                        f"🗑️ Permanently Delete '{del_cname}' and All Associated Data",
+                        type="primary",
+                        disabled=(del_confirm_input.strip() != "DELETE" or del_preview.get("is_locked", False)),
+                        key="btn_exec_permanent_delete",
+                        width="stretch"
+                    )
+
+                    if btn_del_perm:
+                        del_result = channel_manager.delete_channel_permanently(
+                            channel_id=del_cid,
+                            confirmation=del_confirm_input,
+                            admin_user=True,
+                            gh_token=gh_token
+                        )
+                        if del_result.get("success"):
+                            st.cache_data.clear()
+                            st.success(del_result.get("message"))
+                            storage_info = del_result.get("storage_cleanup", {})
+                            if not storage_info.get("success") and storage_info.get("failed_paths"):
+                                st.warning(f"Database records were purged, but storage cleanup reported: {storage_info.get('error')}. You can retry below.")
+                                st.session_state["pending_storage_purge"] = storage_info.get("failed_paths")
+                            st.rerun()
+                        else:
+                            st.error(del_result.get("error") or del_result.get("message"))
+
+                    if "pending_storage_purge" in st.session_state and st.session_state["pending_storage_purge"]:
+                        st.markdown("---")
+                        st.markdown("##### 🗄️ Pending Audio Storage Purge")
+                        st.caption(f"{len(st.session_state['pending_storage_purge'])} audio object(s) awaiting removal from Supabase Storage.")
+                        if st.button("🔄 Retry Storage Audio Purge", key="btn_retry_storage_purge"):
+                            from core import storage_audio
+                            retry_res = storage_audio.retry_storage_cleanup("mediaintel-audio", st.session_state["pending_storage_purge"])
+                            if retry_res.get("success"):
+                                st.success(f"Purged {retry_res.get('deleted_count')} audio storage object(s).")
+                                del st.session_state["pending_storage_purge"]
+                                st.rerun()
+                            else:
+                                st.error(f"Retry failed: {retry_res.get('error')}")
+
             st.markdown("<hr>", unsafe_allow_html=True)
 
             # -----------------------------------------------------------
@@ -1102,14 +1203,6 @@ with tab_system:
             # -----------------------------------------------------------
             st.markdown("##### 🚀 On-Demand Cloud Analysis Engine")
             st.caption("Execute serverless intelligence in GitHub Actions without running Python or Whisper on your laptop.")
-
-            gh_repo = config.env("GITHUB_REPOSITORY") or "Harinath2112/MediaIntel"
-            gh_token = config.env("GITHUB_TOKEN") or config.env("GH_PAT")
-            if not gh_token:
-                try:
-                    gh_token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GH_PAT")
-                except Exception:
-                    pass
 
             branch_ref = (
                 config.env("GITHUB_REF_NAME")

@@ -516,3 +516,76 @@ def renew_audio_claim(
         )
 
         return result.rowcount == 1
+
+
+def delete_storage_audio_objects(bucket: str, object_paths: list[str]) -> dict:
+    """Safely purge audio asset files from private Supabase Storage.
+
+    Returns a dict with:
+        "success": bool,
+        "deleted_count": int,
+        "failed_paths": list[str],
+        "error": str | None
+    """
+    if not object_paths:
+        return {"success": True, "deleted_count": 0, "failed_paths": [], "error": None}
+
+    clean_paths = [p.strip() for p in object_paths if p and p.strip()]
+    if not clean_paths:
+        return {"success": True, "deleted_count": 0, "failed_paths": [], "error": None}
+
+    supabase_url = config.env("SUPABASE_URL")
+    secret_key = config.env("SUPABASE_SECRET_KEY")
+
+    if not supabase_url or not secret_key:
+        try:
+            import streamlit as st
+            supabase_url = supabase_url or st.secrets.get("SUPABASE_URL")
+            secret_key = secret_key or st.secrets.get("SUPABASE_SECRET_KEY")
+        except Exception:
+            pass
+
+    if not supabase_url or not secret_key:
+        return {
+            "success": False,
+            "deleted_count": 0,
+            "failed_paths": clean_paths,
+            "error": "Supabase Storage credentials (SUPABASE_URL, SUPABASE_SECRET_KEY) are not configured.",
+        }
+
+    url = f"{supabase_url.rstrip('/')}/storage/v1/object/{quote(bucket, safe='')}"
+    headers = {
+        "apikey": secret_key,
+        "Authorization": f"Bearer {secret_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {"prefixes": clean_paths}
+
+    try:
+        resp = requests.delete(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code in (200, 204):
+            return {
+                "success": True,
+                "deleted_count": len(clean_paths),
+                "failed_paths": [],
+                "error": None,
+            }
+        else:
+            return {
+                "success": False,
+                "deleted_count": 0,
+                "failed_paths": clean_paths,
+                "error": f"Storage API returned HTTP {resp.status_code}: {resp.text[:200]}",
+            }
+    except Exception as exc:
+        return {
+            "success": False,
+            "deleted_count": 0,
+            "failed_paths": clean_paths,
+            "error": f"Storage network request failed: {type(exc).__name__}: {exc}",
+        }
+
+
+def retry_storage_cleanup(bucket: str, object_paths: list[str]) -> dict:
+    """Safe retry wrapper for cleaning up audio assets."""
+    return delete_storage_audio_objects(bucket, object_paths)

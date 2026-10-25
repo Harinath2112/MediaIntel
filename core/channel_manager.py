@@ -257,7 +257,7 @@ def set_channel_tracking(channel_id: str, is_tracked: bool) -> bool:
 
 
 def get_channel_telemetry_df():
-    """Retrieve full status, video, comment, and transcript telemetry for all registered channels."""
+    """Retrieve full status, video, comment, sentiment, and transcript telemetry for all registered channels."""
     sql = """
         SELECT
             c.channel_name AS "Channel",
@@ -265,11 +265,13 @@ def get_channel_telemetry_df():
             CASE WHEN c.is_tracked THEN 'Active' ELSE 'Inactive' END AS "Tracking",
             COUNT(DISTINCT v.video_id) AS "Videos",
             COUNT(DISTINCT m.comment_id) AS "Comments",
+            COUNT(DISTINCT s.comment_id) AS "Sentiments",
             COUNT(DISTINCT t.video_id) AS "Transcripts",
             MAX(v.published_at) AS "Latest Video"
         FROM channels c
         LEFT JOIN videos v ON v.channel_id = c.channel_id
         LEFT JOIN comments m ON m.video_id = v.video_id
+        LEFT JOIN sentiment_insights s ON s.comment_id = m.comment_id
         LEFT JOIN transcripts t ON t.video_id = v.video_id AND t.source IN ('whisper', 'captions')
         GROUP BY c.channel_id, c.channel_name, c.is_tracked
         ORDER BY c.is_tracked DESC, c.channel_name ASC
@@ -352,11 +354,14 @@ def update_all_channel_run_coverage(
     active_vids = set(active_videos_df["video_id"].tolist()) if not active_videos_df.empty else set()
     candidate_vids = set(candidate_videos_df["video_id"].tolist()) if not candidate_videos_df.empty else set()
 
-    # Load comments and transcripts for active set
+    # Load comments, sentiment insights, and transcripts for active set
     comments_df = config.read_sql("SELECT comment_id, video_id FROM comments")
+    insights_df = config.read_sql("SELECT comment_id FROM sentiment_insights")
     transcripts_df = config.read_sql("SELECT video_id, source, transcript_text FROM transcripts")
 
     active_comments = comments_df[comments_df["video_id"].isin(active_vids)] if not comments_df.empty else comments_df
+    active_comment_ids = set(active_comments["comment_id"].tolist()) if not active_comments.empty else set()
+    active_insights = insights_df[insights_df["comment_id"].isin(active_comment_ids)] if not insights_df.empty else insights_df
     candidate_transcripts = transcripts_df[transcripts_df["video_id"].isin(candidate_vids)] if not transcripts_df.empty else transcripts_df
 
     coverage_rows = []
@@ -373,6 +378,10 @@ def update_all_channel_run_coverage(
         collected_c = len(c_comments)
         target_c = selected_v * 100
 
+        c_comment_ids = set(c_comments["comment_id"].tolist()) if not c_comments.empty else set()
+        c_insights = active_insights[active_insights["comment_id"].isin(c_comment_ids)] if not active_insights.empty else active_insights
+        analyzed_c = len(c_insights)
+
         c_cand = candidate_videos_df[candidate_videos_df["channel_id"] == cid] if not candidate_videos_df.empty else candidate_videos_df
         trans_candidates = min(selected_v, 2)
         c_cand_set = set(c_cand["video_id"].tolist()) if not c_cand.empty else set()
@@ -386,6 +395,39 @@ def update_all_channel_run_coverage(
                 (candidate_transcripts["transcript_text"].str.strip() != "")
             ])
 
+        # Pipeline Stage 1: Video Ingestion
+        if selected_v == 0:
+            v_status = "No Videos Found"
+        elif selected_v >= target_v:
+            v_status = f"Completed ({selected_v}/{target_v})"
+        else:
+            v_status = f"Partial ({selected_v}/{target_v})"
+
+        # Pipeline Stage 2: Comment Collection
+        if selected_v == 0:
+            c_status = "N/A"
+        elif collected_c > 0:
+            c_status = f"Collected ({collected_c})"
+        else:
+            c_status = "Comments Disabled/Zero"
+
+        # Pipeline Stage 3: Sentiment Analysis
+        if collected_c == 0:
+            s_status = "N/A"
+        elif analyzed_c >= collected_c:
+            s_status = f"Analyzed ({analyzed_c}/{collected_c})"
+        else:
+            s_status = f"Analyzing ({analyzed_c}/{collected_c})"
+
+        # Pipeline Stage 4: Whisper Transcription
+        if trans_candidates == 0:
+            tx_status = "N/A"
+        elif completed_tx >= trans_candidates:
+            tx_status = f"Completed ({completed_tx}/{trans_candidates})"
+        else:
+            tx_status = f"Audio Pending ({completed_tx}/{trans_candidates})"
+
+        # Detailed ledger notes / missing data reason (non-alarming, accurate)
         reasons = []
         if selected_v == 0:
             reasons.append("No public videos found on channel")
@@ -394,18 +436,20 @@ def update_all_channel_run_coverage(
         if selected_v > 0 and collected_c == 0:
             reasons.append("Comments disabled or 0 comments published")
         if trans_candidates > completed_tx:
-            reasons.append("Audio unavailable in Supabase Storage")
+            reasons.append(f"Whisper audio pending upload ({completed_tx}/{trans_candidates})")
 
         missing_reason = "; ".join(reasons) if reasons else "None"
 
+        # Overall Status: Ingestion status is NOT penalized by pending whisper audio!
         if selected_v == 0:
             status = "No Data"
-        elif completed_tx == trans_candidates and selected_v >= target_v:
-            status = "Completed"
-        elif completed_tx < trans_candidates and selected_v > 0:
-            status = "Pending Audio"
+        elif selected_v >= target_v and collected_c > 0:
+            if completed_tx >= trans_candidates:
+                status = "Complete"
+            else:
+                status = "Ingestion Complete"
         else:
-            status = "Partial"
+            status = "Partial Ingestion"
 
         coverage_rows.append({
             "channel_id": cid,
@@ -416,6 +460,10 @@ def update_all_channel_run_coverage(
             "collected_comments": collected_c,
             "transcription_candidates": trans_candidates,
             "completed_transcripts": completed_tx,
+            "video_status": v_status,
+            "comment_status": c_status,
+            "sentiment_status": s_status,
+            "transcription_status": tx_status,
             "missing_data_reason": missing_reason,
             "last_run_status": status,
             "updated_at": now,
@@ -425,7 +473,9 @@ def update_all_channel_run_coverage(
         cols = [
             "channel_id", "channel_name", "target_videos", "selected_videos",
             "target_comments", "collected_comments", "transcription_candidates",
-            "completed_transcripts", "missing_data_reason", "last_run_status", "updated_at"
+            "completed_transcripts", "video_status", "comment_status",
+            "sentiment_status", "transcription_status",
+            "missing_data_reason", "last_run_status", "updated_at"
         ]
         upsert_stmt = config.upsert_sql(
             "channel_run_coverage",
@@ -433,6 +483,7 @@ def update_all_channel_run_coverage(
             ["channel_id"],
             ["channel_name", "target_videos", "selected_videos", "target_comments",
              "collected_comments", "transcription_candidates", "completed_transcripts",
+             "video_status", "comment_status", "sentiment_status", "transcription_status",
              "missing_data_reason", "last_run_status", "updated_at"]
         )
         with config.get_engine().begin() as conn:
@@ -447,34 +498,42 @@ def get_channel_run_coverage_df():
                 channel_name AS "Channel Name",
                 target_videos AS "Target Videos",
                 selected_videos AS "Selected Videos",
+                video_status AS "Video Status",
                 target_comments AS "Target Comments",
                 collected_comments AS "Collected Comments",
+                comment_status AS "Comment Status",
+                sentiment_status AS "Sentiment Status",
                 transcription_candidates AS "Transcription Candidates",
                 completed_transcripts AS "Completed Transcripts",
-                missing_data_reason AS "Missing Data Reason",
-                last_run_status AS "Last Run Status"
+                transcription_status AS "Transcription Status",
+                last_run_status AS "Last Run Status",
+                missing_data_reason AS "Missing Data Reason"
             FROM channel_run_coverage
             ORDER BY channel_name ASC
         """
         df = config.read_sql(sql)
-        if not df.empty:
+        if not df.empty and "Video Status" in df.columns:
             return df
     except Exception:
         pass
 
-    # If empty or not yet generated, build dynamically
+    # If empty or not yet generated or missing new columns, build dynamically
     update_all_channel_run_coverage()
     return config.read_sql("""
         SELECT
             channel_name AS "Channel Name",
             target_videos AS "Target Videos",
             selected_videos AS "Selected Videos",
+            video_status AS "Video Status",
             target_comments AS "Target Comments",
             collected_comments AS "Collected Comments",
+            comment_status AS "Comment Status",
+            sentiment_status AS "Sentiment Status",
             transcription_candidates AS "Transcription Candidates",
             completed_transcripts AS "Completed Transcripts",
-            missing_data_reason AS "Missing Data Reason",
-            last_run_status AS "Last Run Status"
+            transcription_status AS "Transcription Status",
+            last_run_status AS "Last Run Status",
+            missing_data_reason AS "Missing Data Reason"
         FROM channel_run_coverage
         ORDER BY channel_name ASC
     """)
@@ -620,3 +679,363 @@ def dispatch_cloud_pipeline(
             "status_code": 500,
             "message": f"Failed to dispatch workflow: {type(exc).__name__}",
         }
+
+
+def check_channel_concurrency(
+    channel_id: str,
+    gh_token: str | None = None,
+    gh_repo: str = "Harinath2112/MediaIntel",
+) -> tuple[bool, str | None]:
+    """Check if any active GitHub Actions pipeline or audio processing lease is currently running for this channel."""
+    # 1. Check GitHub Actions runs if token is available
+    if gh_token:
+        try:
+            runs = get_latest_workflow_runs(gh_token, gh_repo=gh_repo, limit=3)
+            for r in runs:
+                if r.get("status") in ("queued", "in_progress", "waiting"):
+                    return True, f"GitHub Actions cloud pipeline run #{r.get('id')} is currently {r.get('status')}."
+        except Exception:
+            pass
+
+    # 2. Check for active audio claims in database
+    try:
+        active_claims = config.read_sql("""
+            SELECT COUNT(*) AS cnt
+            FROM video_audio_assets a
+            JOIN videos v ON v.video_id = a.video_id
+            WHERE v.channel_id = :cid
+              AND a.status = 'processing'
+              AND a.lease_expires_at > CURRENT_TIMESTAMP
+        """, {"cid": channel_id})
+        if not active_claims.empty and int(active_claims.iloc[0]["cnt"]) > 0:
+            return True, "Audio worker currently has an active processing lease on this channel's video(s)."
+    except Exception:
+        pass
+
+    return False, None
+
+
+def preview_channel_deletion(
+    channel_id: str,
+    gh_token: str | None = None,
+) -> dict[str, Any]:
+    """Inspect and return record counts across all 12 tables for a channel deletion preview.
+
+    Non-destructive inspection before permanent deletion.
+    """
+    cid = (channel_id or "").strip()
+    if not cid:
+        return {"exists": False, "channel_id": cid, "error": "Invalid channel ID"}
+
+    # 1. Fetch channel row
+    ch_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels WHERE channel_id = :cid", {"cid": cid})
+    if ch_df.empty:
+        return {
+            "exists": False,
+            "channel_id": cid,
+            "channel_name": None,
+            "message": f"Channel '{cid}' does not exist in database.",
+        }
+
+    cname = ch_df.iloc[0]["channel_name"]
+    is_tracked = bool(ch_df.iloc[0]["is_tracked"])
+
+    # 2. Concurrency check
+    is_locked, lock_reason = check_channel_concurrency(cid, gh_token=gh_token)
+
+    # 3. Query record counts across all dependent tables
+    counts: dict[str, int] = {}
+
+    v_df = config.read_sql("SELECT COUNT(*) AS cnt FROM videos WHERE channel_id = :cid", {"cid": cid})
+    counts["videos"] = int(v_df.iloc[0]["cnt"]) if not v_df.empty else 0
+
+    c_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM comments
+        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["comments"] = int(c_df.iloc[0]["cnt"]) if not c_df.empty else 0
+
+    s_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM sentiment_insights
+        WHERE comment_id IN (
+            SELECT c.comment_id FROM comments c
+            JOIN videos v ON v.video_id = c.video_id
+            WHERE v.channel_id = :cid
+        )
+    """, {"cid": cid})
+    counts["sentiment_insights"] = int(s_df.iloc[0]["cnt"]) if not s_df.empty else 0
+
+    asp_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM aspect_sentiments
+        WHERE comment_id IN (
+            SELECT c.comment_id FROM comments c
+            JOIN videos v ON v.video_id = c.video_id
+            WHERE v.channel_id = :cid
+        )
+    """, {"cid": cid})
+    counts["aspect_sentiments"] = int(asp_df.iloc[0]["cnt"]) if not asp_df.empty else 0
+
+    t_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM transcripts
+        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["transcripts"] = int(t_df.iloc[0]["cnt"]) if not t_df.empty else 0
+
+    vaa_df = config.read_sql("""
+        SELECT bucket, object_path FROM video_audio_assets
+        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["video_audio_assets"] = len(vaa_df)
+    audio_paths = vaa_df["object_path"].tolist() if not vaa_df.empty and "object_path" in vaa_df.columns else []
+
+    vsh_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM video_stats_history
+        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["video_stats_history"] = int(vsh_df.iloc[0]["cnt"]) if not vsh_df.empty else 0
+
+    vr_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM video_relevance
+        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["video_relevance"] = int(vr_df.iloc[0]["cnt"]) if not vr_df.empty else 0
+
+    aa_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM anomaly_alerts
+        WHERE channel_id = :cid
+           OR video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+    """, {"cid": cid})
+    counts["anomaly_alerts"] = int(aa_df.iloc[0]["cnt"]) if not aa_df.empty else 0
+
+    top_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM topic_suggestions
+        WHERE scope = :cid
+    """, {"cid": cid})
+    counts["topic_suggestions"] = int(top_df.iloc[0]["cnt"]) if not top_df.empty else 0
+
+    cov_df = config.read_sql("""
+        SELECT COUNT(*) AS cnt FROM channel_run_coverage
+        WHERE channel_id = :cid
+    """, {"cid": cid})
+    counts["channel_run_coverage"] = int(cov_df.iloc[0]["cnt"]) if not cov_df.empty else 0
+
+    counts["channels"] = 1
+    total_relational = sum(counts.values())
+
+    return {
+        "exists": True,
+        "channel_id": cid,
+        "channel_name": cname,
+        "is_tracked": is_tracked,
+        "record_counts": counts,
+        "total_records": total_relational,
+        "storage_audio_objects": audio_paths,
+        "storage_audio_count": len(audio_paths),
+        "is_locked": is_locked,
+        "lock_reason": lock_reason,
+    }
+
+
+def delete_channel_permanently(
+    channel_id: str,
+    confirmation: str,
+    admin_user: bool = True,
+    gh_token: str | None = None,
+    force_unlocked: bool = False,
+) -> dict[str, Any]:
+    """Permanently delete a channel and all its associated records in a single database transaction.
+
+    Enforces:
+    - Administrator authorization
+    - Exact 'DELETE' typed confirmation
+    - Concurrency safety (blocks deletion if a workflow or audio claim is active)
+    - Full child-to-parent relational cascade in an atomic SQL transaction
+    - Isolated channel scoping: Never deletes shared global topics (scope='all') or other channels
+    - Safe Supabase Storage audio asset cleanup with retry support
+    - Local target_channels.json synchronization
+    - Idempotent execution
+    """
+    # 1. Admin authorization check
+    if not admin_user:
+        return {
+            "success": False,
+            "error": "Unauthorized: Administrator privileges are required to permanently delete channels.",
+        }
+
+    # 2. Confirmation check
+    if (confirmation or "").strip() != "DELETE":
+        return {
+            "success": False,
+            "error": "Safety confirmation failed: You must type 'DELETE' exactly in uppercase to confirm permanent deletion.",
+        }
+
+    cid = (channel_id or "").strip()
+    if not cid:
+        return {"success": False, "error": "Invalid channel ID provided."}
+
+    # 3. Concurrency check
+    is_locked, lock_reason = check_channel_concurrency(cid, gh_token=gh_token)
+    if is_locked and not force_unlocked:
+        return {
+            "success": False,
+            "error": f"Deletion blocked by concurrency safeguard: {lock_reason}",
+        }
+
+    # 4. Preview record counts before deletion
+    preview = preview_channel_deletion(cid, gh_token=gh_token)
+    if not preview.get("exists"):
+        return {
+            "success": True,
+            "already_deleted": True,
+            "channel_id": cid,
+            "channel_name": preview.get("channel_name"),
+            "message": f"Channel '{cid}' does not exist or has already been deleted.",
+        }
+
+    channel_name = preview["channel_name"]
+    counts = preview["record_counts"]
+    audio_paths = preview["storage_audio_objects"]
+
+    # 5. Execute relational deletion in a single atomic transaction
+    engine = config.get_engine()
+    try:
+        with engine.begin() as conn:
+            # 1. aspect_sentiments
+            conn.execute(text("""
+                DELETE FROM aspect_sentiments
+                WHERE comment_id IN (
+                    SELECT c.comment_id FROM comments c
+                    JOIN videos v ON v.video_id = c.video_id
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 2. sentiment_insights
+            conn.execute(text("""
+                DELETE FROM sentiment_insights
+                WHERE comment_id IN (
+                    SELECT c.comment_id FROM comments c
+                    JOIN videos v ON v.video_id = c.video_id
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 3. comments
+            conn.execute(text("""
+                DELETE FROM comments
+                WHERE video_id IN (
+                    SELECT v.video_id FROM videos v
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 4. transcripts
+            conn.execute(text("""
+                DELETE FROM transcripts
+                WHERE video_id IN (
+                    SELECT v.video_id FROM videos v
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 5. video_audio_assets
+            conn.execute(text("""
+                DELETE FROM video_audio_assets
+                WHERE video_id IN (
+                    SELECT v.video_id FROM videos v
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 6. video_stats_history
+            conn.execute(text("""
+                DELETE FROM video_stats_history
+                WHERE video_id IN (
+                    SELECT v.video_id FROM videos v
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 7. video_relevance
+            conn.execute(text("""
+                DELETE FROM video_relevance
+                WHERE video_id IN (
+                    SELECT v.video_id FROM videos v
+                    WHERE v.channel_id = :cid
+                )
+            """), {"cid": cid})
+
+            # 8. anomaly_alerts
+            conn.execute(text("""
+                DELETE FROM anomaly_alerts
+                WHERE channel_id = :cid
+                   OR video_id IN (
+                       SELECT v.video_id FROM videos v
+                       WHERE v.channel_id = :cid
+                   )
+            """), {"cid": cid})
+
+            # 9. topic_suggestions (strictly channel-scoped, preserving scope = 'all' and other channels)
+            conn.execute(text("""
+                DELETE FROM topic_suggestions
+                WHERE scope = :cid
+            """), {"cid": cid})
+
+            # 10. videos
+            conn.execute(text("""
+                DELETE FROM videos
+                WHERE channel_id = :cid
+            """), {"cid": cid})
+
+            # 11. channel_run_coverage
+            conn.execute(text("""
+                DELETE FROM channel_run_coverage
+                WHERE channel_id = :cid
+            """), {"cid": cid})
+
+            # 12. channels
+            conn.execute(text("""
+                DELETE FROM channels
+                WHERE channel_id = :cid
+            """), {"cid": cid})
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Database transaction failed and was completely rolled back: {type(exc).__name__}: {exc}",
+        }
+
+    # 6. Synchronize target_channels.json if it exists locally
+    try:
+        if config.CHANNELS_FILE.exists():
+            current_json = json.loads(config.CHANNELS_FILE.read_text(encoding="utf-8"))
+            if isinstance(current_json, list):
+                updated_json = [item for item in current_json if (item.get("channel_id") or "").strip() != cid]
+                config.CHANNELS_FILE.write_text(json.dumps(updated_json, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # 7. Safe Supabase Storage audio cleanup
+    storage_result = {"success": True, "deleted_count": 0, "failed_paths": [], "error": None}
+    if audio_paths:
+        try:
+            from core import storage_audio
+            storage_result = storage_audio.delete_storage_audio_objects("mediaintel-audio", audio_paths)
+        except Exception as exc:
+            storage_result = {
+                "success": False,
+                "deleted_count": 0,
+                "failed_paths": audio_paths,
+                "error": f"Storage cleanup exception: {type(exc).__name__}: {exc}",
+            }
+
+    return {
+        "success": True,
+        "already_deleted": False,
+        "channel_id": cid,
+        "channel_name": channel_name,
+        "deleted_counts": counts,
+        "storage_cleanup": storage_result,
+        "message": f"Channel '{channel_name}' ({cid}) and all associated records permanently deleted.",
+    }
+

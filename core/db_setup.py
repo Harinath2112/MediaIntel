@@ -157,6 +157,10 @@ Table("channel_run_coverage", metadata,
       Column("collected_comments", Integer, server_default="0"),
       Column("transcription_candidates", Integer, server_default="2"),
       Column("completed_transcripts", Integer, server_default="0"),
+      Column("video_status", String(50), server_default="Completed"),
+      Column("comment_status", String(50), server_default="Completed"),
+      Column("sentiment_status", String(50), server_default="Completed"),
+      Column("transcription_status", String(50), server_default="Audio Pending"),
       Column("missing_data_reason", String(255)),
       Column("last_run_status", String(50), server_default="success"),
       Column("updated_at", DateTime, server_default=NOW), **KW)
@@ -170,6 +174,10 @@ COLUMN_MIGRATIONS = [
     ("sentiment_insights", "model_name", "VARCHAR(100)"),
     ("aspect_sentiments", "evidence", "VARCHAR(300)"),
     ("anomaly_alerts", "severity", "VARCHAR(10)"),
+    ("channel_run_coverage", "video_status", "VARCHAR(50) DEFAULT 'Completed'"),
+    ("channel_run_coverage", "comment_status", "VARCHAR(50) DEFAULT 'Completed'"),
+    ("channel_run_coverage", "sentiment_status", "VARCHAR(50) DEFAULT 'Completed'"),
+    ("channel_run_coverage", "transcription_status", "VARCHAR(50) DEFAULT 'Audio Pending'"),
 ]
 
 
