@@ -283,16 +283,16 @@ def get_channel_telemetry_df():
             COUNT(DISTINCT v.video_id) AS "Videos",
             COUNT(DISTINCT m.comment_id) AS "Comments",
             COUNT(DISTINCT s.comment_id) AS "Sentiments",
-            COUNT(DISTINCT t.video_id) AS "Transcripts",
+            COUNT(DISTINCT CASE WHEN t.source = 'whisper' AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Whisper Transcripts",
+            COUNT(DISTINCT CASE WHEN t.source = 'captions' AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Captions",
+            COUNT(DISTINCT CASE WHEN t.source IN ('whisper', 'captions') AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Total Completed Transcripts",
+            COUNT(DISTINCT CASE WHEN t.source = 'audio_unavailable' THEN t.video_id END) AS "Audio Unavailable",
             MAX(v.published_at) AS "Latest Video"
         FROM channels c
         LEFT JOIN videos v ON v.channel_id = c.channel_id
         LEFT JOIN comments m ON m.video_id = v.video_id
         LEFT JOIN sentiment_insights s ON s.comment_id = m.comment_id
-        LEFT JOIN transcripts t ON t.video_id = v.video_id 
-             AND t.source IN ('whisper', 'captions')
-             AND t.transcript_text IS NOT NULL
-             AND TRIM(t.transcript_text) != ''
+        LEFT JOIN transcripts t ON t.video_id = v.video_id
         GROUP BY c.channel_id, c.channel_name, c.is_tracked
         ORDER BY c.is_tracked DESC, c.channel_name ASC
     """

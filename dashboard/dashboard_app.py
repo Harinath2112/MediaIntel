@@ -957,7 +957,13 @@ with tab_system:
             st.metric("Videos Partition", len(videos))
             st.metric("Insights Partition", len(insights))
             st.metric("Aspect Rows (ABSA)", len(aspects_df))
-            st.metric("Whisper Transcripts", int((transcripts_df["source"] == "whisper").sum()) if not transcripts_df.empty else 0)
+            wh_tx_cnt = int((transcripts_df["source"] == "whisper").sum()) if not transcripts_df.empty else 0
+            cap_tx_cnt = int((transcripts_df["source"] == "captions").sum()) if not transcripts_df.empty else 0
+            unavail_tx_cnt = int((transcripts_df["source"] == "audio_unavailable").sum()) if not transcripts_df.empty else 0
+            st.metric("Whisper Transcripts", wh_tx_cnt)
+            st.metric("Captions Transcripts", cap_tx_cnt)
+            if unavail_tx_cnt > 0:
+                st.metric("Audio Unavailable Records", unavail_tx_cnt)
             st.metric("Topic Suggestions", len(topics_df))
 
     st.markdown("<br>", unsafe_allow_html=True)

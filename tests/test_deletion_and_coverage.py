@@ -540,9 +540,16 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         telemetry_df = channel_manager.get_channel_telemetry_df()
         cb_telem = telemetry_df[telemetry_df["Channel"] == "Codebasics Replica"].iloc[0]
         apna_telem = telemetry_df[telemetry_df["Channel"] == "Apna College Replica"].iloc[0]
-        # Telemetry only counts completed transcripts (non-empty text, source whisper/captions)
-        self.assertEqual(cb_telem["Transcripts"], 0)
-        self.assertEqual(apna_telem["Transcripts"], 2)
+        # Telemetry clearly differentiates Whisper, Captions, Total Completed, and Audio Unavailable
+        self.assertEqual(cb_telem["Total Completed Transcripts"], 0)
+        self.assertEqual(cb_telem["Whisper Transcripts"], 0)
+        self.assertEqual(cb_telem["Captions"], 0)
+        self.assertEqual(cb_telem["Audio Unavailable"], 2)
+
+        self.assertEqual(apna_telem["Total Completed Transcripts"], 2)
+        self.assertEqual(apna_telem["Whisper Transcripts"], 2)
+        self.assertEqual(apna_telem["Captions"], 0)
+        self.assertEqual(apna_telem["Audio Unavailable"], 0)
 
         # 5. Verify Permanent Deletion Preview
         cb_prev = channel_manager.preview_channel_deletion("UC_CB_TEST")
@@ -602,6 +609,96 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         row_2 = cov_df_2[cov_df_2["Channel Name"] == cname].iloc[0]
         self.assertEqual(row_2["Collected Comments"], 4)
         self.assertEqual(row_2["Sentiment Status"], "Analyzed (4/4)")
+
+    def test_17_transcripts_source_and_candidate_consistency(self):
+        """Test 17: Verify 2 Whisper + 8 Captions vs Audio Unavailable across telemetry and coverage ledger."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cid_a = "UC_CHAN_A"
+        cid_b = "UC_CHAN_B"
+
+        with self.engine.begin() as conn:
+            # Channel A: 10 videos, top 2 Whisper, other 8 Captions
+            conn.execute(text("INSERT INTO channels (channel_id, channel_name, is_tracked) VALUES (:cid, 'Channel Alpha', TRUE)"),
+                         {"cid": cid_a})
+            for i in range(1, 11):
+                vid = f"va_{i}"
+                views = 1000 - i * 10
+                conn.execute(text("""
+                    INSERT INTO videos (video_id, channel_id, title, published_at, view_count, like_count, comment_count)
+                    VALUES (:vid, :cid, :title, :now, :views, 50, 10)
+                """), {"vid": vid, "cid": cid_a, "title": f"Alpha Video {i}", "now": now, "views": views})
+                if i <= 2:
+                    conn.execute(text("""
+                        INSERT INTO transcripts (video_id, source, language, model_name, transcript_text, audio_seconds, word_count)
+                        VALUES (:vid, 'whisper', 'en', 'base', 'Whisper spoken audio transcript text', 120, 200)
+                    """), {"vid": vid})
+                else:
+                    conn.execute(text("""
+                        INSERT INTO transcripts (video_id, source, language, model_name, transcript_text, audio_seconds, word_count)
+                        VALUES (:vid, 'captions', 'en', 'captions', 'Captions transcript text', 120, 200)
+                    """), {"vid": vid})
+
+            # Channel B: 10 videos, top 2 audio_unavailable, other 8 no transcripts
+            conn.execute(text("INSERT INTO channels (channel_id, channel_name, is_tracked) VALUES (:cid, 'Channel Beta', TRUE)"),
+                         {"cid": cid_b})
+            for i in range(1, 11):
+                vid = f"vb_{i}"
+                views = 500 - i * 10
+                conn.execute(text("""
+                    INSERT INTO videos (video_id, channel_id, title, published_at, view_count, like_count, comment_count)
+                    VALUES (:vid, :cid, :title, :now, :views, 20, 5)
+                """), {"vid": vid, "cid": cid_b, "title": f"Beta Video {i}", "now": now, "views": views})
+                if i <= 2:
+                    conn.execute(text("""
+                        INSERT INTO transcripts (video_id, source, language, model_name, transcript_text, audio_seconds, word_count)
+                        VALUES (:vid, 'audio_unavailable', 'en', 'none', '[AUDIO_UNAVAILABLE] No audio asset in storage', 0, 0)
+                    """), {"vid": vid})
+
+        # 1. Verify All-Time Channel Telemetry
+        telem = channel_manager.get_channel_telemetry_df()
+        a_tel = telem[telem["Channel"] == "Channel Alpha"].iloc[0]
+        b_tel = telem[telem["Channel"] == "Channel Beta"].iloc[0]
+
+        # Channel Alpha: 2 Whisper + 8 Captions = 10 Total Completed Transcripts, 0 Audio Unavailable
+        self.assertEqual(a_tel["Videos"], 10)
+        self.assertEqual(a_tel["Whisper Transcripts"], 2)
+        self.assertEqual(a_tel["Captions"], 8)
+        self.assertEqual(a_tel["Total Completed Transcripts"], 10)
+        self.assertEqual(a_tel["Audio Unavailable"], 0)
+
+        # Channel Beta: 0 Whisper + 0 Captions = 0 Completed Transcripts, 2 Audio Unavailable
+        self.assertEqual(b_tel["Videos"], 10)
+        self.assertEqual(b_tel["Whisper Transcripts"], 0)
+        self.assertEqual(b_tel["Captions"], 0)
+        self.assertEqual(b_tel["Total Completed Transcripts"], 0)
+        self.assertEqual(b_tel["Audio Unavailable"], 2)
+
+        # 2. Verify Active Coverage Ledger (evaluates top 2 candidate videos per channel)
+        channel_manager.update_all_channel_run_coverage(video_limit=10)
+        cov = channel_manager.get_channel_run_coverage_df()
+        a_cov = cov[cov["Channel Name"] == "Channel Alpha"].iloc[0]
+        b_cov = cov[cov["Channel Name"] == "Channel Beta"].iloc[0]
+
+        self.assertEqual(a_cov["Transcription Candidates"], 2)
+        self.assertEqual(a_cov["Completed Transcripts"], 2)
+        self.assertEqual(a_cov["Transcription Status"], "Completed (2/2)")
+
+        self.assertEqual(b_cov["Transcription Candidates"], 2)
+        self.assertEqual(b_cov["Completed Transcripts"], 0)
+        self.assertEqual(b_cov["Transcription Status"], "Audio Pending (0/2)")
+
+        # 3. Verify Permanent Deletion Preview
+        a_prev = channel_manager.preview_channel_deletion(cid_a)
+        self.assertEqual(a_prev["record_counts"]["transcripts"], 10)
+        self.assertEqual(a_prev["completed_transcripts"], 10)
+        self.assertEqual(a_prev["active_set_transcripts"], 2)
+        self.assertEqual(a_prev["pending_audio_records"], 0)
+
+        b_prev = channel_manager.preview_channel_deletion(cid_b)
+        self.assertEqual(b_prev["record_counts"]["transcripts"], 2)
+        self.assertEqual(b_prev["completed_transcripts"], 0)
+        self.assertEqual(b_prev["active_set_transcripts"], 0)
+        self.assertEqual(b_prev["pending_audio_records"], 2)
 
 
 if __name__ == "__main__":
