@@ -18,6 +18,23 @@ from sqlalchemy import text
 
 from core import config
 
+__all__ = [
+    "parse_channel_input",
+    "resolve_channel_identifier",
+    "register_single_channel",
+    "register_batch_channels",
+    "set_channel_tracking",
+    "get_channel_telemetry_df",
+    "update_all_channel_run_coverage",
+    "get_channel_run_coverage_df",
+    "get_latest_workflow_runs",
+    "get_workflow_run_jobs",
+    "dispatch_cloud_pipeline",
+    "check_channel_concurrency",
+    "preview_channel_deletion",
+    "delete_channel_permanently",
+]
+
 
 def parse_channel_input(raw_text: str) -> list[dict[str, str]]:
     """Parse raw input text into a list of candidate items.
@@ -727,113 +744,128 @@ def preview_channel_deletion(
     if not cid:
         return {"exists": False, "channel_id": cid, "error": "Invalid channel ID"}
 
-    # 1. Fetch channel row
-    ch_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels WHERE channel_id = :cid", {"cid": cid})
-    if ch_df.empty:
+    try:
+        # 1. Fetch channel row
+        ch_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels WHERE channel_id = :cid", {"cid": cid})
+        if ch_df.empty:
+            return {
+                "exists": False,
+                "channel_id": cid,
+                "channel_name": None,
+                "message": f"Channel '{cid}' does not exist in database.",
+            }
+
+        cname = ch_df.iloc[0]["channel_name"]
+        is_tracked = bool(ch_df.iloc[0]["is_tracked"])
+
+        # 2. Concurrency check
+        is_locked, lock_reason = check_channel_concurrency(cid, gh_token=gh_token)
+
+        # 3. Query record counts across all dependent tables
+        counts: dict[str, int] = {}
+
+        v_df = config.read_sql("SELECT COUNT(*) AS cnt FROM videos WHERE channel_id = :cid", {"cid": cid})
+        counts["videos"] = int(v_df.iloc[0]["cnt"]) if not v_df.empty else 0
+
+        c_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM comments
+            WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["comments"] = int(c_df.iloc[0]["cnt"]) if not c_df.empty else 0
+
+        s_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM sentiment_insights
+            WHERE comment_id IN (
+                SELECT c.comment_id FROM comments c
+                JOIN videos v ON v.video_id = c.video_id
+                WHERE v.channel_id = :cid
+            )
+        """, {"cid": cid})
+        counts["sentiment_insights"] = int(s_df.iloc[0]["cnt"]) if not s_df.empty else 0
+
+        asp_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM aspect_sentiments
+            WHERE comment_id IN (
+                SELECT c.comment_id FROM comments c
+                JOIN videos v ON v.video_id = c.video_id
+                WHERE v.channel_id = :cid
+            )
+        """, {"cid": cid})
+        counts["aspect_sentiments"] = int(asp_df.iloc[0]["cnt"]) if not asp_df.empty else 0
+
+        t_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM transcripts
+            WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["transcripts"] = int(t_df.iloc[0]["cnt"]) if not t_df.empty else 0
+
+        vaa_df = config.read_sql("""
+            SELECT bucket, object_path FROM video_audio_assets
+            WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["video_audio_assets"] = len(vaa_df)
+        audio_paths = vaa_df["object_path"].tolist() if not vaa_df.empty and "object_path" in vaa_df.columns else []
+
+        vsh_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM video_stats_history
+            WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["video_stats_history"] = int(vsh_df.iloc[0]["cnt"]) if not vsh_df.empty else 0
+
+        vr_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM video_relevance
+            WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["video_relevance"] = int(vr_df.iloc[0]["cnt"]) if not vr_df.empty else 0
+
+        aa_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM anomaly_alerts
+            WHERE channel_id = :cid
+               OR video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
+        """, {"cid": cid})
+        counts["anomaly_alerts"] = int(aa_df.iloc[0]["cnt"]) if not aa_df.empty else 0
+
+        top_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM topic_suggestions
+            WHERE scope = :cid
+        """, {"cid": cid})
+        counts["topic_suggestions"] = int(top_df.iloc[0]["cnt"]) if not top_df.empty else 0
+
+        cov_df = config.read_sql("""
+            SELECT COUNT(*) AS cnt FROM channel_run_coverage
+            WHERE channel_id = :cid
+        """, {"cid": cid})
+        counts["channel_run_coverage"] = int(cov_df.iloc[0]["cnt"]) if not cov_df.empty else 0
+
+        counts["channels"] = 1
+        total_relational = sum(counts.values())
+
         return {
-            "exists": False,
+            "exists": True,
             "channel_id": cid,
-            "channel_name": None,
-            "message": f"Channel '{cid}' does not exist in database.",
+            "channel_name": cname,
+            "is_tracked": is_tracked,
+            "record_counts": counts,
+            "total_records": total_relational,
+            "storage_audio_objects": audio_paths,
+            "storage_audio_count": len(audio_paths),
+            "is_locked": is_locked,
+            "lock_reason": lock_reason,
         }
-
-    cname = ch_df.iloc[0]["channel_name"]
-    is_tracked = bool(ch_df.iloc[0]["is_tracked"])
-
-    # 2. Concurrency check
-    is_locked, lock_reason = check_channel_concurrency(cid, gh_token=gh_token)
-
-    # 3. Query record counts across all dependent tables
-    counts: dict[str, int] = {}
-
-    v_df = config.read_sql("SELECT COUNT(*) AS cnt FROM videos WHERE channel_id = :cid", {"cid": cid})
-    counts["videos"] = int(v_df.iloc[0]["cnt"]) if not v_df.empty else 0
-
-    c_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM comments
-        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["comments"] = int(c_df.iloc[0]["cnt"]) if not c_df.empty else 0
-
-    s_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM sentiment_insights
-        WHERE comment_id IN (
-            SELECT c.comment_id FROM comments c
-            JOIN videos v ON v.video_id = c.video_id
-            WHERE v.channel_id = :cid
-        )
-    """, {"cid": cid})
-    counts["sentiment_insights"] = int(s_df.iloc[0]["cnt"]) if not s_df.empty else 0
-
-    asp_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM aspect_sentiments
-        WHERE comment_id IN (
-            SELECT c.comment_id FROM comments c
-            JOIN videos v ON v.video_id = c.video_id
-            WHERE v.channel_id = :cid
-        )
-    """, {"cid": cid})
-    counts["aspect_sentiments"] = int(asp_df.iloc[0]["cnt"]) if not asp_df.empty else 0
-
-    t_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM transcripts
-        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["transcripts"] = int(t_df.iloc[0]["cnt"]) if not t_df.empty else 0
-
-    vaa_df = config.read_sql("""
-        SELECT bucket, object_path FROM video_audio_assets
-        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["video_audio_assets"] = len(vaa_df)
-    audio_paths = vaa_df["object_path"].tolist() if not vaa_df.empty and "object_path" in vaa_df.columns else []
-
-    vsh_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM video_stats_history
-        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["video_stats_history"] = int(vsh_df.iloc[0]["cnt"]) if not vsh_df.empty else 0
-
-    vr_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM video_relevance
-        WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["video_relevance"] = int(vr_df.iloc[0]["cnt"]) if not vr_df.empty else 0
-
-    aa_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM anomaly_alerts
-        WHERE channel_id = :cid
-           OR video_id IN (SELECT video_id FROM videos WHERE channel_id = :cid)
-    """, {"cid": cid})
-    counts["anomaly_alerts"] = int(aa_df.iloc[0]["cnt"]) if not aa_df.empty else 0
-
-    top_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM topic_suggestions
-        WHERE scope = :cid
-    """, {"cid": cid})
-    counts["topic_suggestions"] = int(top_df.iloc[0]["cnt"]) if not top_df.empty else 0
-
-    cov_df = config.read_sql("""
-        SELECT COUNT(*) AS cnt FROM channel_run_coverage
-        WHERE channel_id = :cid
-    """, {"cid": cid})
-    counts["channel_run_coverage"] = int(cov_df.iloc[0]["cnt"]) if not cov_df.empty else 0
-
-    counts["channels"] = 1
-    total_relational = sum(counts.values())
-
-    return {
-        "exists": True,
-        "channel_id": cid,
-        "channel_name": cname,
-        "is_tracked": is_tracked,
-        "record_counts": counts,
-        "total_records": total_relational,
-        "storage_audio_objects": audio_paths,
-        "storage_audio_count": len(audio_paths),
-        "is_locked": is_locked,
-        "lock_reason": lock_reason,
-    }
+    except Exception as exc:
+        return {
+            "exists": True,
+            "channel_id": cid,
+            "channel_name": cid,
+            "is_tracked": True,
+            "record_counts": {},
+            "total_records": 0,
+            "storage_audio_objects": [],
+            "storage_audio_count": 0,
+            "is_locked": False,
+            "lock_reason": None,
+            "error": f"Preview notice: {type(exc).__name__}: {exc}",
+        }
 
 
 def delete_channel_permanently(

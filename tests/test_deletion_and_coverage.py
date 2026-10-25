@@ -29,8 +29,13 @@ from core import channel_manager, config, db_setup, storage_audio
 class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # In-memory SQLite for deterministic, isolated testing
-        cls.engine = create_engine("sqlite:///:memory:")
+        # In-memory SQLite for deterministic, isolated testing across threads
+        from sqlalchemy.pool import StaticPool
+        cls.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
         db_setup.metadata.create_all(cls.engine)
         cls._orig_get_engine = config.get_engine
         config.get_engine = lambda: cls.engine
@@ -422,6 +427,71 @@ class TestDashboardZeroFixAndChannelDeletion(unittest.TestCase):
         s_check = config.read_sql("SELECT COUNT(*) AS cnt FROM sentiment_insights WHERE comment_id LIKE '%UC_DISABLE%'")
         self.assertEqual(int(s_check.iloc[0]["cnt"]), 4)
 
+    def test_13_admin_deletion_preview_attribute_safety(self):
+        """Test 13: preview_channel_deletion exists, accepts gh_token, and returns robust preview dict."""
+        self._seed_channel_with_full_records("UC_PREV", "Preview Target")
+
+        # 1. Module attribute check
+        self.assertTrue(hasattr(channel_manager, "preview_channel_deletion"))
+        self.assertTrue(hasattr(channel_manager, "delete_channel_permanently"))
+        self.assertTrue(hasattr(channel_manager, "check_channel_concurrency"))
+
+        # 2. Call preview_channel_deletion with gh_token None
+        prev_none = channel_manager.preview_channel_deletion("UC_PREV", gh_token=None)
+        self.assertTrue(prev_none["exists"])
+        self.assertEqual(prev_none["channel_id"], "UC_PREV")
+        self.assertEqual(prev_none["channel_name"], "Preview Target")
+        self.assertIn("record_counts", prev_none)
+        self.assertEqual(prev_none["record_counts"]["videos"], 2)
+        self.assertEqual(prev_none["record_counts"]["comments"], 4)
+        self.assertGreater(prev_none["total_records"], 0)
+        self.assertIn("is_locked", prev_none)
+
+        # 3. Call with gh_token string (kwarg matching dashboard_app.py line 1125)
+        prev_tok = channel_manager.preview_channel_deletion("UC_PREV", gh_token="ghp_test_token")
+        self.assertTrue(prev_tok["exists"])
+        self.assertEqual(prev_tok["record_counts"]["videos"], 2)
+
+        # 4. Safe recovery simulation if module attribute was temporarily missing
+        import importlib
+        import types
+        fake_mod = types.ModuleType("core.channel_manager")
+        self.assertFalse(hasattr(fake_mod, "preview_channel_deletion"))
+        # Simulating dashboard's dynamic reload protection
+        if not hasattr(fake_mod, "preview_channel_deletion"):
+            restored = importlib.import_module("core.channel_manager")
+            importlib.reload(restored)
+            self.assertTrue(hasattr(restored, "preview_channel_deletion"))
+
+    def test_14_admin_dashboard_smoke_test(self):
+        """Test 14: Streamlit AppTest verifies admin login path renders without AttributeError or exceptions."""
+        import subprocess
+        import sys
+        root_dir = Path(__file__).resolve().parents[1]
+        dashboard_path = root_dir / "dashboard" / "dashboard_app.py"
+
+        probe = (
+            "import sys\n"
+            "from streamlit.testing.v1 import AppTest\n"
+            f"at = AppTest.from_file(r'{dashboard_path}', default_timeout=30)\n"
+            "at.session_state['admin_authenticated'] = True\n"
+            "at.run()\n"
+            "print('EXC', len(at.exception))\n"
+            "assert len(at.exception) == 0\n"
+            "from core import config\n"
+            "config.dispose_engine()\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(res.returncode, 0, f"Dashboard failed: {res.stderr}")
+        self.assertIn("EXC 0", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
+

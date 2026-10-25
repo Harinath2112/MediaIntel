@@ -1,6 +1,7 @@
 """MediaIntel Streamlit dashboard: Overview, Sentiment, Performance, Relevance & Next Topics,
 Channel Comparison, Alerts and System Health. Reads the same database the pipeline writes."""
 
+import importlib
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,13 @@ import plotly.graph_objects as go
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import config  # noqa: E402
 from core import channel_manager  # noqa: E402
+
+# Ensure channel_manager module is refreshed if updated on Streamlit Cloud without container reboot
+try:
+    importlib.reload(channel_manager)
+except Exception:
+    pass
+
 from core import insights as report_helpers  # noqa: E402  (scorecard / Whisper / topic helpers shared with the PDF)
 
 LOGO = Path(__file__).resolve().parent / "assets" / "mediaintel_logo.png"
@@ -1015,7 +1023,10 @@ with tab_system:
             # -----------------------------------------------------------
             # Section 1: Channel Onboarding & Tracking Controls
             # -----------------------------------------------------------
-            all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY is_tracked DESC, channel_name ASC")
+            try:
+                all_channels_df = config.read_sql("SELECT channel_id, channel_name, is_tracked FROM channels ORDER BY is_tracked DESC, channel_name ASC")
+            except Exception:
+                all_channels_df = pd.DataFrame(columns=["channel_id", "channel_name", "is_tracked"])
 
             col_onboard, col_tracking = st.columns([3, 2])
 
@@ -1121,7 +1132,13 @@ with tab_system:
                     )
                     del_cid, del_cname = del_channel_map[sel_del_label]
 
-                    # Concurrency check & preview
+                    # Concurrency check & preview with dynamic module refresh protection
+                    if not hasattr(channel_manager, "preview_channel_deletion"):
+                        try:
+                            importlib.reload(channel_manager)
+                        except Exception:
+                            pass
+
                     del_preview = channel_manager.preview_channel_deletion(del_cid, gh_token=gh_token)
 
                     st.markdown(f"**Target Channel:** `{del_cname}` &nbsp;&nbsp;|&nbsp;&nbsp; **YouTube Channel ID:** `{del_cid}`")
@@ -1165,6 +1182,12 @@ with tab_system:
                     )
 
                     if btn_del_perm:
+                        if not hasattr(channel_manager, "delete_channel_permanently"):
+                            try:
+                                importlib.reload(channel_manager)
+                            except Exception:
+                                pass
+
                         del_result = channel_manager.delete_channel_permanently(
                             channel_id=del_cid,
                             confirmation=del_confirm_input,
@@ -1204,11 +1227,13 @@ with tab_system:
             st.markdown("##### 🚀 On-Demand Cloud Analysis Engine")
             st.caption("Execute serverless intelligence in GitHub Actions without running Python or Whisper on your laptop.")
 
-            branch_ref = (
-                config.env("GITHUB_REF_NAME")
-                or (st.secrets.get("GITHUB_REF_NAME") if hasattr(st, "secrets") and "GITHUB_REF_NAME" in st.secrets else None)
-                or "main"
-            )
+            branch_ref = config.env("GITHUB_REF_NAME")
+            if not branch_ref:
+                try:
+                    branch_ref = st.secrets.get("GITHUB_REF_NAME")
+                except Exception:
+                    pass
+            branch_ref = branch_ref or "main"
 
             p_c1, p_c2, p_c3 = st.columns([2, 1, 1])
             with p_c1:
