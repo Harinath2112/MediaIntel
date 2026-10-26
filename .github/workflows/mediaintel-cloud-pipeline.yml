@@ -328,7 +328,6 @@ jobs:
             data/rpa_logs/rpa_report.html
             data/rpa_logs/rpa_log.html
             data/rpa_logs/dispatch_result.json
-            data/rpa_logs/outbox/*.eml
           if-no-files-found: warn
           retention-days: 14
 

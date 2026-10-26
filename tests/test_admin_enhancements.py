@@ -259,6 +259,143 @@ class TestAdminEnhancements(unittest.TestCase):
         self.assertEqual(counts["channels"], 1)
         self.assertGreaterEqual(preview["total_records"], 9)
 
+    # -------------------------------------------------------------------------
+    # PART E: RPA Artifact Privacy and Security Verification
+    # -------------------------------------------------------------------------
+    def test_workflow_artifact_paths_exclude_eml_files(self):
+        """Workflow upload-artifact step strictly excludes outbox .eml drafts from public artifacts."""
+        wf_path = ROOT / ".github" / "workflows" / "mediaintel-cloud-pipeline.yml"
+        content = wf_path.read_text(encoding="utf-8")
+        self.assertNotIn("*.eml", content)
+        self.assertNotIn("outbox", content)
+
+    def test_dry_run_draft_uses_non_personal_placeholders_and_hides_real_secrets(self):
+        """Dry-run .eml draft strictly uses internal placeholders even if personal secrets are present in env."""
+        rpa = MediaIntelRPA()
+        mail = {
+            "subject": "Dry Run Test",
+            "text": "Dry run plain text body",
+            "html": "<p>Dry run HTML body</p>",
+            "alerts": 0,
+            "new_alerts": 0,
+        }
+        config.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.OUTPUTS_DIR / "MediaIntel_Dashboard_Documentation.pdf").write_bytes(b"%PDF-1.4 dummy")
+        (config.OUTPUTS_DIR / "AlertSummary.txt").write_text("Dummy summary", encoding="utf-8")
+
+        # Simulate presence of personal email secrets in environment
+        personal_env = {
+            "RPA_DRY_RUN": "1",
+            "SMTP_USER": "kurapatiharinath2005@gmail.com",
+            "ALERT_RECIPIENT": "23h51a6733@cmrcet.ac.in",
+            "SMTP_PASSWORD": "supersecretpassword123",
+        }
+        with patch.dict(os.environ, personal_env, clear=False):
+            status = rpa.send_email_with_attachments(mail)
+            self.assertEqual(status, "DRY_RUN")
+
+            # Read latest .eml file from outbox
+            outbox = config.RPA_LOG_DIR / "outbox"
+            eml_files = sorted(outbox.glob("mail_*.eml"))
+            self.assertTrue(len(eml_files) > 0)
+            eml_text = eml_files[-1].read_text(encoding="utf-8", errors="ignore")
+
+            # Check that placeholders are present
+            self.assertIn("From: alerts-dryrun@mediaintel.internal", eml_text)
+            self.assertIn("To: subscribers-dryrun@mediaintel.internal", eml_text)
+
+            # Check that personal email and password DO NOT appear anywhere in the draft
+            self.assertNotIn("kurapatiharinath2005@gmail.com", eml_text)
+            self.assertNotIn("23h51a6733@cmrcet.ac.in", eml_text)
+            self.assertNotIn("supersecretpassword123", eml_text)
+
+    @patch("smtplib.SMTP")
+    @patch("smtplib.SMTP_SSL")
+    def test_dry_run_never_initiates_smtp_or_database_mutation(self, mock_ssl, mock_smtp):
+        """Dry-run mode never opens an SMTP socket and mark_alerts_emailed never mutates the database."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            conn.execute(text("INSERT INTO channels (channel_id, channel_name, is_tracked, created_at) VALUES ('UC_SAFE', 'Safe Channel', 1, :now)"), {"now": now})
+            conn.execute(text("INSERT INTO videos (video_id, channel_id, title, view_count, published_at, fetched_at) VALUES ('V_SAFE', 'UC_SAFE', 'Safe Video', 10, :now, :now)"), {"now": now})
+            conn.execute(text("""
+                INSERT INTO anomaly_alerts (id, video_id, channel_id, metric, velocity, baseline, ratio, severity, detected_at, emailed)
+                VALUES (501, 'V_SAFE', 'UC_SAFE', 'views', 200.0, 20.0, 10.0, 'HIGH', :now, 0)
+            """), {"now": now})
+
+        rpa = MediaIntelRPA()
+        rpa._new_ids = [501]
+        mail = {
+            "subject": "Dry Run Test",
+            "text": "Body",
+            "html": "<p>Body</p>",
+            "alerts": 1,
+            "new_alerts": 1,
+        }
+        with patch.dict(os.environ, {"RPA_DRY_RUN": "1"}, clear=False):
+            status = rpa.send_email_with_attachments(mail)
+            self.assertEqual(status, "DRY_RUN")
+            mock_smtp.assert_not_called()
+            mock_ssl.assert_not_called()
+
+            # mark_alerts_emailed must return 0 and make zero DB updates
+            closed = rpa.mark_alerts_emailed(status)
+            self.assertEqual(closed, 0)
+
+            with self.engine.connect() as conn:
+                res = conn.execute(text("SELECT emailed FROM anomaly_alerts WHERE id = 501")).scalar()
+                self.assertEqual(res, 0)
+
+    @patch("smtplib.SMTP")
+    def test_live_smtp_preserved_and_marks_alerts_emailed(self, mock_smtp_cls):
+        """When RPA_DRY_RUN=0 and valid SMTP credentials exist, real email dispatch is attempted and DB is updated."""
+        mock_server = MagicMock()
+        mock_smtp_cls.return_value = mock_server
+        mock_server.__enter__.return_value = mock_server
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self.engine.begin() as conn:
+            conn.execute(text("INSERT INTO channels (channel_id, channel_name, is_tracked, created_at) VALUES ('UC_LIVE', 'Live Channel', 1, :now)"), {"now": now})
+            conn.execute(text("INSERT INTO videos (video_id, channel_id, title, view_count, published_at, fetched_at) VALUES ('V_LIVE', 'UC_LIVE', 'Live Video', 10, :now, :now)"), {"now": now})
+            conn.execute(text("""
+                INSERT INTO anomaly_alerts (id, video_id, channel_id, metric, velocity, baseline, ratio, severity, detected_at, emailed)
+                VALUES (601, 'V_LIVE', 'UC_LIVE', 'views', 300.0, 30.0, 10.0, 'HIGH', :now, 0)
+            """), {"now": now})
+
+        rpa = MediaIntelRPA()
+        rpa._new_ids = [601]
+        mail = {
+            "subject": "Live Test",
+            "text": "Live Body",
+            "html": "<p>Live Body</p>",
+            "alerts": 1,
+            "new_alerts": 1,
+        }
+        live_env = {
+            "RPA_DRY_RUN": "0",
+            "SMTP_HOST": "smtp.test.com",
+            "SMTP_SERVER": "smtp.test.com",
+            "SMTP_PORT": "587",
+            "SMTP_USER": "sender@test.com",
+            "SENDER_EMAIL": "sender@test.com",
+            "SMTP_PASSWORD": "password123",
+            "SENDER_PASSWORD": "password123",
+            "ALERT_RECIPIENT": "recipient@test.com",
+            "RECIPIENT_EMAIL": "recipient@test.com",
+        }
+        with patch.dict(os.environ, live_env, clear=False):
+            status = rpa.send_email_with_attachments(mail)
+            self.assertEqual(status, "SENT")
+            mock_server.login.assert_called_once_with("sender@test.com", "password123")
+            mock_server.send_message.assert_called_once()
+
+            # mark_alerts_emailed must update DB
+            closed = rpa.mark_alerts_emailed(status)
+            self.assertEqual(closed, 1)
+
+            with self.engine.connect() as conn:
+                res = conn.execute(text("SELECT emailed FROM anomaly_alerts WHERE id = 601")).scalar()
+                self.assertEqual(res, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

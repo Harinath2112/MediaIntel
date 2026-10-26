@@ -200,8 +200,13 @@ class MediaIntelRPA:
             raise AssertionError(msg_err)
 
         msg = EmailMessage()
-        msg["From"] = sender or "mediaintel@localhost"
-        msg["To"] = ", ".join(recipients) or "demo@localhost"
+        if dry:
+            # Mask personal email headers in dry-run mode to ensure local/CI drafts never store sensitive addresses
+            msg["From"] = "alerts-dryrun@mediaintel.internal"
+            msg["To"] = "subscribers-dryrun@mediaintel.internal"
+        else:
+            msg["From"] = sender or "mediaintel@localhost"
+            msg["To"] = ", ".join(recipients) or "demo@localhost"
         msg["Subject"] = mail["subject"]
         msg.set_content(mail["text"])
         msg.add_alternative(mail["html"], subtype="html")
@@ -230,7 +235,7 @@ class MediaIntelRPA:
         except Exception as exc:
             self._result(mail, "FAILED", note=str(exc)[:200])
             raise AssertionError(f"SMTP delivery failed: {exc}") from exc
-        self._result(mail, "SENT", note=f"to {', '.join(recipients)}")
+        self._result(mail, "SENT", note=f"delivered to {len(recipients)} recipient(s)")
         return "SENT"
 
     def mark_alerts_emailed(self, status):
