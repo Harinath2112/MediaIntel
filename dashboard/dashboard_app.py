@@ -608,9 +608,9 @@ with tab_whisper:
     if tx.empty or (channels.empty):
         empty_state("No audio or transcript telemetry available. Add YouTube channels and run Full Analysis.")
     else:
-        whisper_tx = tx[tx["source"] == "whisper"] if not tx.empty else pd.DataFrame()
-        captions_tx = tx[tx["source"] == "captions"] if not tx.empty else pd.DataFrame()
-        unavail_tx = tx[tx["source"] == "audio_unavailable"] if not tx.empty else pd.DataFrame()
+        whisper_tx = tx[tx["source"].isin(["whisper", "faster_whisper"])] if not tx.empty else pd.DataFrame()
+        captions_tx = tx[tx["source"].isin(["captions", "youtube_manual_caption", "youtube_auto_caption"])] if not tx.empty else pd.DataFrame()
+        unavail_tx = tx[tx["source"].isin(["audio_unavailable", "awaiting_authorized_audio"])] if not tx.empty else pd.DataFrame()
         failed_tx = tx[tx["source"] == "failed"] if not tx.empty else pd.DataFrame()
 
         whisper_cnt = len(whisper_tx)
@@ -662,9 +662,9 @@ with tab_whisper:
                 section_title("📡", "Audio & Caption Provenance Coverage by Channel")
                 if not tx.empty:
                     cov = tx.groupby("channel_id").agg(
-                        whisper=("source", lambda s: (s == "whisper").sum()),
-                        captions=("source", lambda s: (s == "captions").sum()),
-                        unavail=("source", lambda s: (s == "audio_unavailable").sum()),
+                        whisper=("source", lambda s: s.isin(["whisper", "faster_whisper"]).sum()),
+                        captions=("source", lambda s: s.isin(["captions", "youtube_manual_caption", "youtube_auto_caption"]).sum()),
+                        unavail=("source", lambda s: s.isin(["audio_unavailable", "awaiting_authorized_audio"]).sum()),
                         total=("video_id", "count")
                     ).reset_index().merge(channels[["channel_id", "channel_name"]], on="channel_id")
 
@@ -695,8 +695,8 @@ with tab_whisper:
         wt1, wt2 = st.columns(2)
         with wt1:
             with st.container(border=True):
-                section_title("💬", "Topics the Creators Talk About (from transcripts/captions)")
-                valid_tx_subset = tx[tx["source"].isin(["whisper", "captions"]) & tx["transcript_text"].notna()]
+                valid_sources = ["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]
+                valid_tx_subset = tx[tx["source"].isin(valid_sources) & tx["transcript_text"].notna() & (tx["transcript_text"].str.strip() != "")]
                 spoken = report_helpers.spoken_topics(valid_tx_subset[["video_id", "transcript_text"]]) if not valid_tx_subset.empty else pd.DataFrame()
                 if spoken.empty:
                     empty_state("Not enough transcript or caption text to extract creator topics yet.")
@@ -735,16 +735,17 @@ with tab_whisper:
                 src = str(row.get("source") or "unknown")
                 mins = (row["audio_seconds"] or 0) / 60 if pd.notna(row.get("audio_seconds")) else 0
 
-                if src == "whisper":
-                    st.success(f"🎙️ **Audio Transcription Source: OpenAI Faster-Whisper** · Model: `{row.get('model_name')}` · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words · {mins:.1f} min audio decoded")
+                if src in ("whisper", "faster_whisper"):
+                    st.success(f"🎙️ **Audio Transcription Source: Faster-Whisper** · Model: `{row.get('model_name')}` · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words · {mins:.1f} min audio decoded")
                     st.text_area("Whisper Transcript", str(row["transcript_text"] or ""), height=220)
-                elif src == "captions":
-                    st.info(f"📝 **Transcription Source: Official/Community YouTube Captions (Lawful Fallback)** · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words")
+                elif src in ("captions", "youtube_manual_caption", "youtube_auto_caption"):
+                    c_type_label = f" ({row.get('caption_type')})" if row.get("caption_type") else ""
+                    st.info(f"📝 **Audio Transcription Source: YouTube Captions{c_type_label}** · Language: `{row.get('language')}` · {int(row.get('word_count') or 0)} words")
                     st.text_area("Captions Text", str(row["transcript_text"] or ""), height=220)
-                elif src == "audio_unavailable":
-                    err_text = str(row.get("last_error") or "YouTube streaming restricted; no captions available on video.")
-                    st.warning(f"⚠️ **Audio Unavailable:** {err_text}")
-                    st.caption("No transcript text is fabricated. Fallback title and description are utilized for downstream relevance analysis.")
+                elif src in ("audio_unavailable", "awaiting_authorized_audio"):
+                    err_text = str(row.get("last_error") or "YouTube streaming restricted; awaiting authorized audio upload.")
+                    st.warning(f"⚠️ **Awaiting Authorized Audio:** {err_text}")
+                    st.caption("No transcript text is fabricated. Administrators can upload genuine audio in the System Health & Admin tab.")
                 else:
                     st.error(f"❌ **Status: {src}** — {str(row.get('last_error') or 'Processing pending or failed')}")
 
@@ -1036,13 +1037,13 @@ with tab_system:
             st.metric("Videos Partition", len(videos))
             st.metric("Insights Partition", len(insights))
             st.metric("Aspect Rows (ABSA)", len(aspects_df))
-            wh_tx_cnt = int((transcripts_df["source"] == "whisper").sum()) if not transcripts_df.empty else 0
-            cap_tx_cnt = int((transcripts_df["source"] == "captions").sum()) if not transcripts_df.empty else 0
-            unavail_tx_cnt = int((transcripts_df["source"] == "audio_unavailable").sum()) if not transcripts_df.empty else 0
+            wh_tx_cnt = int(transcripts_df["source"].isin(["whisper", "faster_whisper"]).sum()) if not transcripts_df.empty else 0
+            cap_tx_cnt = int(transcripts_df["source"].isin(["captions", "youtube_manual_caption", "youtube_auto_caption"]).sum()) if not transcripts_df.empty else 0
+            unavail_tx_cnt = int(transcripts_df["source"].isin(["audio_unavailable", "awaiting_authorized_audio"]).sum()) if not transcripts_df.empty else 0
             st.metric("Whisper Transcripts", wh_tx_cnt)
             st.metric("Captions Transcripts", cap_tx_cnt)
             if unavail_tx_cnt > 0:
-                st.metric("Audio Unavailable Records", unavail_tx_cnt)
+                st.metric("Awaiting Audio Records", unavail_tx_cnt)
             st.metric("Topic Suggestions", len(topics_df))
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1427,6 +1428,195 @@ with tab_system:
                             st.warning(f"⚠️ {dispatch_res['message']} [Click here to view the active run in GitHub Actions]({run_url}).")
                         else:
                             st.error(f"❌ {dispatch_res['message']}")
+
+            # -----------------------------------------------------------
+            # Section 2.2: Compact Transcription Management & Authorized Audio Center
+            # -----------------------------------------------------------
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("##### 🎙️ Compact Transcription & Authorized Audio Management Area")
+            st.caption(
+                "Monitor candidate video transcription statuses, upload authorized audio assets for restricted videos, "
+                "and perform immediate Faster-Whisper transcription retries."
+            )
+
+            cand_videos_df = channel_manager.get_transcription_candidate_videos(limit_per_channel=2)
+            if cand_videos_df.empty:
+                st.info("No active competitor videos found to evaluate for transcription.")
+            else:
+                tx_meta_df = config.read_sql("""
+                    SELECT video_id, source, caption_type, status, language,
+                           model_name, audio_seconds, word_count, is_truncated,
+                           last_error, updated_at
+                    FROM transcripts
+                """)
+                tx_merged = cand_videos_df.merge(tx_meta_df, on="video_id", how="left")
+
+                display_rows = []
+                awaiting_videos_options = {}
+
+                for r in tx_merged.itertuples():
+                    vid = str(r.video_id)
+                    cname = str(getattr(r, "channel_name", "") or r.channel_id)
+                    title = str(getattr(r, "title", "") or vid)
+                    pub_date = str(r.published_at)[:10] if pd.notna(r.published_at) else "—"
+
+                    raw_src = getattr(r, "source", None)
+                    raw_status = getattr(r, "status", None)
+                    err = getattr(r, "last_error", None) or ""
+                    lang = getattr(r, "language", None) or "—"
+                    upd = str(r.updated_at)[:19] if pd.notna(getattr(r, "updated_at", None)) else "—"
+
+                    if pd.isna(raw_src) or not raw_src:
+                        t_status = "Pending"
+                        t_source = "None"
+                        reason = "Awaiting transcription pass"
+                        awaiting_videos_options[f"{cname} — {title[:40]} ({vid})"] = (vid, cname, title)
+                    elif raw_src in ("whisper", "faster_whisper"):
+                        t_status = "Completed"
+                        t_source = "Faster-Whisper"
+                        reason = "Completed via Faster-Whisper"
+                    elif raw_src in ("captions", "youtube_manual_caption", "youtube_auto_caption"):
+                        t_status = "Completed"
+                        c_type = getattr(r, "caption_type", "") or ("manual" if raw_src == "youtube_manual_caption" else "auto")
+                        t_source = f"Captions ({c_type})"
+                        reason = "Completed via YouTube captions"
+                    elif raw_src in ("awaiting_authorized_audio", "audio_unavailable") or raw_status == "awaiting_authorized_audio":
+                        t_status = "Awaiting Authorized Audio"
+                        t_source = "Awaiting Audio"
+                        reason = err or "Direct YouTube audio restricted; awaiting authorized upload"
+                        awaiting_videos_options[f"{cname} — {title[:40]} ({vid})"] = (vid, cname, title)
+                    else:
+                        t_status = "Failed"
+                        t_source = str(raw_src)
+                        reason = err or "Processing failed"
+                        awaiting_videos_options[f"{cname} — {title[:40]} ({vid})"] = (vid, cname, title)
+
+                    display_rows.append({
+                        "Channel Name": cname,
+                        "Video Title": title[:50] + ("…" if len(title) > 50 else ""),
+                        "Video ID": vid,
+                        "Publication Date": pub_date,
+                        "Transcript Status": t_status,
+                        "Transcript Source": t_source,
+                        "Transcript Language": lang,
+                        "Processing Timestamp": upd,
+                        "Failure / Waiting Reason": reason[:60] + ("…" if len(reason) > 60 else ""),
+                    })
+
+                st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
+
+                if awaiting_videos_options:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    with st.container(border=True):
+                        st.markdown("###### 📤 Authorized Audio Upload & Immediate Transcription")
+                        st.caption(
+                            "Provide an authorized MP3, WAV, or M4A audio recording for competitor videos whose audio could not be "
+                            "acquired automatically. Audio is securely stored in Supabase Storage (`mediaintel-audio`) and transcribed."
+                        )
+
+                        sel_target_label = st.selectbox(
+                            "Select Target Video Awaiting Audio",
+                            list(awaiting_videos_options.keys()),
+                            key="sel_awaiting_audio_vid",
+                        )
+                        sel_vid, sel_cname, sel_title = awaiting_videos_options[sel_target_label]
+
+                        st.markdown(f"**Target Channel:** `{sel_cname}` &nbsp;&nbsp;|&nbsp;&nbsp; **Video:** `{sel_title}` (`{sel_vid}`)")
+
+                        up_col1, up_col2 = st.columns([3, 2])
+                        with up_col1:
+                            uploaded_audio_file = st.file_uploader(
+                                "Upload Authorized Audio File (MP3, WAV, M4A — max 25 MB)",
+                                type=["mp3", "wav", "m4a", "ogg", "webm"],
+                                key="uploader_admin_audio",
+                                help="Upload a genuine audio recording for this specific video. Magic bytes and size are validated server-side."
+                            )
+                        with up_col2:
+                            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+                            rights_confirmed = st.checkbox(
+                                "I confirm that I have the authorization and rights to provide and process this audio asset.",
+                                value=False,
+                                key="cb_audio_rights_confirm",
+                            )
+                            btn_upload_audio = st.button(
+                                "📤 Upload Audio Asset to Storage",
+                                disabled=(uploaded_audio_file is None or not rights_confirmed),
+                                width="stretch",
+                                key="btn_exec_audio_upload",
+                            )
+
+                        if btn_upload_audio and uploaded_audio_file is not None and rights_confirmed:
+                            from core import cloud_audio_upload
+                            with st.spinner("Validating media format server-side and uploading to private storage..."):
+                                file_bytes = uploaded_audio_file.read()
+                                up_res = cloud_audio_upload.save_and_upload_admin_audio(
+                                    video_id=sel_vid,
+                                    file_bytes=file_bytes,
+                                    filename=uploaded_audio_file.name,
+                                )
+                                if up_res["success"]:
+                                    st.success(f"✅ {up_res['message']}")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ Upload failed: {up_res['error']}")
+
+                        # Check if audio asset is present in storage and show Standalone Cloud Retry button
+                        from core import storage_audio
+                        existing_mapping = storage_audio.get_audio_mapping(sel_vid)
+                        if existing_mapping is not None:
+                            st.info(f"ℹ️ **Audio Asset Ready in Storage:** `{existing_mapping[1]}` (Bucket: `{existing_mapping[0]}`). Faster-Whisper will process this asset in GitHub Actions without consuming Streamlit Cloud CPU/memory.")
+                            retry_c1, retry_c2 = st.columns([2, 1])
+                            with retry_c1:
+                                whisper_size_choice = st.selectbox(
+                                    "Whisper Model Size",
+                                    ["tiny", "base", "small"],
+                                    index=0,
+                                    key=f"wh_model_sel_{sel_vid}",
+                                    help="tiny runs fastest on CPU with int8 quantization."
+                                )
+                            with retry_c2:
+                                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                                btn_transcribe_now = st.button(
+                                    "⚡ Transcribe Now (Faster-Whisper)",
+                                    type="primary",
+                                    width="stretch",
+                                    key=f"btn_retry_whisper_{sel_vid}",
+                                    help="Dispatches a standalone Faster-Whisper job to GitHub Actions to transcribe this stored audio."
+                                )
+
+                            if btn_transcribe_now:
+                                if not gh_token:
+                                    st.error(
+                                        "⚠️ GitHub personal access token (`GITHUB_TOKEN`) is not configured in secrets. "
+                                        "Faster-Whisper executes exclusively in GitHub Actions to protect Streamlit Cloud resources. "
+                                        "Please configure `GITHUB_TOKEN = 'ghp_...'` in Streamlit Secrets or environment variables to dispatch cloud transcription."
+                                    )
+                                else:
+                                    with st.spinner(f"Dispatching Faster-Whisper ({whisper_size_choice}) job to GitHub Actions for video `{sel_vid}`..."):
+                                        d_res = channel_manager.dispatch_transcription_retry(
+                                            gh_token=gh_token,
+                                            gh_repo=gh_repo,
+                                            ref=branch_ref,
+                                            video_id=sel_vid,
+                                            whisper_model=whisper_size_choice,
+                                            force=True,
+                                        )
+                                        if d_res["success"]:
+                                            st.session_state["pipeline_dispatched"] = True
+                                            st.session_state["pipeline_dispatched_at"] = datetime.now().strftime("%H:%M:%S")
+                                            st.success(
+                                                f"🚀 Standalone Faster-Whisper transcription job queued in GitHub Actions for video `{sel_vid}`! "
+                                                f"(Model: `{whisper_size_choice}`). Processing will execute in GitHub Actions using the stored audio asset."
+                                            )
+                                            st.rerun()
+                                        elif d_res.get("status_code") == 409:
+                                            active_r = d_res.get("active_run", {})
+                                            run_url = active_r.get("html_url", f"https://github.com/{gh_repo}/actions")
+                                            st.warning(f"⚠️ A cloud pipeline run is already in progress. [Click here to view run #{active_r.get('id')}]({run_url}).")
+                                        else:
+                                            st.error(f"❌ Failed to dispatch cloud transcription: {d_res['message']}")
+                else:
+                    st.success("✅ All candidate target videos have completed transcripts.")
 
             # -----------------------------------------------------------
             # Section 2.5: Administrator PDF Report & Alert Email Dispatcher

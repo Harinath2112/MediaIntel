@@ -47,7 +47,7 @@ on:
         type: string
         default: '100'
       transcripts_per_channel:
-        description: 'Top videos ranked by view count to select for transcription per channel'
+        description: 'Latest published videos to select for transcription per channel (default 2)'
         required: false
         type: string
         default: '2'
@@ -56,6 +56,26 @@ on:
         required: false
         type: string
         default: '0'
+      force_retranscribe:
+        description: 'Force re-transcription of completed videos'
+        required: false
+        type: boolean
+        default: false
+      whisper_model:
+        description: 'Faster-Whisper model size (tiny | base | small)'
+        required: false
+        type: string
+        default: 'tiny'
+      caption_workers:
+        description: 'Concurrent YouTube caption workers'
+        required: false
+        type: string
+        default: '3'
+      video_id:
+        description: 'Specific YouTube Video ID for single-video transcription retry (optional)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -154,12 +174,26 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           INPUT_TRANSCRIPTS_PER_CHANNEL: ${{ inputs.transcripts_per_channel }}
-          WHISPER_MODEL: tiny
+          INPUT_FORCE_RETRANSCRIBE: ${{ inputs.force_retranscribe }}
+          INPUT_WHISPER_MODEL: ${{ inputs.whisper_model }}
+          INPUT_CAPTION_WORKERS: ${{ inputs.caption_workers }}
+          INPUT_VIDEO_ID: ${{ inputs.video_id }}
+          WHISPER_MODEL: ${{ inputs.whisper_model || 'tiny' }}
           WHISPER_COMPUTE: int8
           OMP_NUM_THREADS: '2'
         run: |
           TRANS_LIMIT="${INPUT_TRANSCRIPTS_PER_CHANNEL:-2}"
-          python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 600
+          MODEL="${INPUT_WHISPER_MODEL:-tiny}"
+          WORKERS="${INPUT_CAPTION_WORKERS:-3}"
+          EXTRA_ARGS=""
+          if [ "$INPUT_FORCE_RETRANSCRIBE" = "true" ]; then
+            EXTRA_ARGS="--force-retranscribe"
+          fi
+          TARGET_VID="${INPUT_VIDEO_ID:-}"
+          if [ -n "$TARGET_VID" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --video-id $TARGET_VID"
+          fi
+          python -m core.cloud_whisper_worker --limit "$TRANS_LIMIT" --max-seconds 1800 --whisper-model "$MODEL" --caption-workers "$WORKERS" $EXTRA_ARGS
 
   ai-analytics:
     name: Cloud AI & Analytics Pipeline

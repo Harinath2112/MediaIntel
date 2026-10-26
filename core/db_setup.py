@@ -78,7 +78,7 @@ Table("aspect_sentiments", metadata,
 
 Table("transcripts", metadata,
       Column("video_id", String(50), _fk("videos.video_id"), primary_key=True),
-      Column("source", String(20), nullable=False),               # whisper | captions | failed
+      Column("source", String(50), nullable=False),               # whisper | captions | failed | youtube_manual_caption | youtube_auto_caption | faster_whisper | awaiting_authorized_audio
       Column("language", String(12)),
       Column("model_name", String(60)),
       Column("transcript_text", LONGTEXT),
@@ -86,6 +86,10 @@ Table("transcripts", metadata,
       Column("word_count", Integer),
       Column("attempts", Integer, server_default="0"),
       Column("last_error", String(255)),
+      Column("channel_id", String(50), _fk("channels.channel_id")),
+      Column("caption_type", String(20)),
+      Column("status", String(30), server_default="completed"),
+      Column("is_truncated", Boolean, server_default="0"),
       Column("updated_at", DateTime, server_default=NOW), **KW)
 
 Table("video_audio_assets", metadata,
@@ -178,6 +182,10 @@ COLUMN_MIGRATIONS = [
     ("channel_run_coverage", "comment_status", "VARCHAR(50) DEFAULT 'Completed'"),
     ("channel_run_coverage", "sentiment_status", "VARCHAR(50) DEFAULT 'Completed'"),
     ("channel_run_coverage", "transcription_status", "VARCHAR(50) DEFAULT 'Audio Pending'"),
+    ("transcripts", "channel_id", "VARCHAR(50)"),
+    ("transcripts", "caption_type", "VARCHAR(20)"),
+    ("transcripts", "status", "VARCHAR(30) DEFAULT 'completed'"),
+    ("transcripts", "is_truncated", "BOOLEAN DEFAULT FALSE"),
 ]
 
 
@@ -273,6 +281,16 @@ def ensure_schema(verbose: bool = True) -> list[str]:
             if column not in existing:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
                 upgraded.append(f"{table}.{column}")
+        if "transcripts" in insp.get_table_names():
+            source_col = next((c for c in insp.get_columns("transcripts") if c["name"] == "source"), None)
+            if source_col and hasattr(source_col.get("type"), "length") and (source_col["type"].length or 0) < 50:
+                backend = engine.dialect.name
+                if backend == "postgresql":
+                    conn.execute(text("ALTER TABLE transcripts ALTER COLUMN source TYPE VARCHAR(50)"))
+                    upgraded.append("transcripts.source(VARCHAR(50))")
+                elif backend == "mysql":
+                    conn.execute(text("ALTER TABLE transcripts MODIFY COLUMN source VARCHAR(50) NOT NULL"))
+                    upgraded.append("transcripts.source(VARCHAR(50))")
     if verbose:
         print("Database ready (" + config.db_label() + ")." + (" Upgraded: " + ", ".join(upgraded) if upgraded else ""))
     return upgraded

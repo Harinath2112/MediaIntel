@@ -120,7 +120,7 @@ def whisper_summary(transcripts: pd.DataFrame, videos: pd.DataFrame) -> dict:
     """Facts about the Whisper audio analysis: coverage, minutes analysed, languages, speaking pace."""
     if transcripts.empty:
         return {"videos": 0, "minutes": 0.0, "languages": {}, "pace": None, "words": 0, "share": 0.0}
-    w = transcripts[transcripts["source"] == "whisper"]
+    w = transcripts[transcripts["source"].isin(["whisper", "faster_whisper"])]
     secs = float(w["audio_seconds"].fillna(0).sum()) if "audio_seconds" in w else 0.0
     words = int(w["word_count"].fillna(0).sum())
     langs = w["language"].fillna("und").value_counts().to_dict()

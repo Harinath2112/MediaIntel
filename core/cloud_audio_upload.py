@@ -5,8 +5,10 @@ from __future__ import annotations
 import mimetypes
 import re
 from pathlib import Path
+from core import config
 
-from core.config import get_engine
+def get_engine():
+    return config.get_engine()
 
 BUCKET = "mediaintel-audio"
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
@@ -114,7 +116,7 @@ def upload_to_private_storage(video_id: str, file_path: str | Path) -> str:
 
     return object_path
 
-def verify_video_upload_eligibility(video_id: str) -> None:
+def verify_video_upload_eligibility(video_id: str, allow_reupload: bool = True) -> None:
     """Reject uploads for unknown, untracked, or already-processed videos."""
     from sqlalchemy import text
 
@@ -138,7 +140,9 @@ def verify_video_upload_eligibility(video_id: str) -> None:
                     EXISTS (
                         SELECT 1 FROM transcripts t
                         WHERE t.video_id = v.video_id
-                          AND t.source IN ('whisper', 'captions')
+                          AND t.source IN ('whisper', 'faster_whisper', 'captions', 'youtube_manual_caption', 'youtube_auto_caption')
+                          AND t.transcript_text IS NOT NULL
+                          AND TRIM(t.transcript_text) != ''
                     ) AS has_transcript
                 FROM videos v
                 JOIN channels c ON c.channel_id = v.channel_id
@@ -153,7 +157,7 @@ def verify_video_upload_eligibility(video_id: str) -> None:
     if not row["is_tracked"]:
         raise ValueError("Video belongs to an untracked channel.")
 
-    if row["has_mapping"]:
+    if not allow_reupload and row["has_mapping"]:
         raise ValueError("Audio mapping already exists for this video.")
 
     if row["has_transcript"]:
@@ -168,7 +172,7 @@ def create_audio_mapping(video_id: str, object_path: str) -> None:
         raise ValueError("Invalid YouTube video ID.")
 
     if not re.fullmatch(
-        rf"videos/{re.escape(video_id)}/[0-9a-f]{{32}}\.(m4a|mp3|wav|ogg|webm)",
+        rf"videos/{re.escape(video_id)}/[A-Za-z0-9_-]+\.(m4a|mp3|wav|ogg|webm)",
         object_path,
     ):
         raise ValueError("Invalid audio object path.")
@@ -191,9 +195,20 @@ def create_audio_mapping(video_id: str, object_path: str) -> None:
                   AND NOT EXISTS (
                       SELECT 1 FROM transcripts t
                       WHERE t.video_id = v.video_id
-                        AND t.source IN ('whisper', 'captions')
+                        AND t.source IN ('whisper', 'faster_whisper', 'captions', 'youtube_manual_caption', 'youtube_auto_caption')
+                        AND t.transcript_text IS NOT NULL
+                        AND TRIM(t.transcript_text) != ''
                   )
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (video_id) DO UPDATE SET
+                    bucket = EXCLUDED.bucket,
+                    object_path = EXCLUDED.object_path,
+                    status = 'pending',
+                    attempts = 0,
+                    last_error = NULL,
+                    claimed_at = NULL,
+                    claim_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 RETURNING video_id
             """),
             {
@@ -206,7 +221,7 @@ def create_audio_mapping(video_id: str, object_path: str) -> None:
         if result is None:
             raise ValueError(
                 "Audio mapping was not created: video is ineligible "
-                "or a conflicting mapping already exists."
+                "or already has a completed transcript."
             )
 
 
@@ -330,4 +345,82 @@ def acquire_and_upload_authorized_audio(
 
         acquired_path = audio_candidates[0]
         return upload_authorized_audio(video_id, acquired_path)
+
+
+def save_and_upload_admin_audio(video_id: str, file_bytes: bytes, filename: str) -> dict:
+    """Validate server-side and upload admin-supplied authorized audio to Supabase Storage.
+
+    Accepts raw file bytes and filename from Streamlit file_uploader.
+    Performs server-side file type, magic byte, and size validation in a safe temp file.
+    Registers audio asset and marks video state for Faster-Whisper transcription.
+    """
+    import tempfile
+    from sqlalchemy import text
+
+    if not VIDEO_ID_PATTERN.fullmatch(video_id):
+        return {"success": False, "error": "Invalid YouTube video ID format."}
+
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_AUDIO_TYPES:
+        return {
+            "success": False,
+            "error": f"Unsupported audio format '{ext}'. Supported formats: MP3, WAV, M4A, OGG, WEBM.",
+        }
+
+    if len(file_bytes) == 0:
+        return {"success": False, "error": "Audio file is empty (0 bytes)."}
+
+    if len(file_bytes) > MAX_AUDIO_BYTES:
+        return {
+            "success": False,
+            "error": f"Audio file exceeds maximum size limit of {MAX_AUDIO_BYTES // (1024 * 1024)} MB.",
+        }
+
+    tmp_file = tempfile.NamedTemporaryFile(prefix=f"admin_audio_{video_id}_", suffix=ext, delete=False)
+    try:
+        tmp_file.write(file_bytes)
+        tmp_file.flush()
+        tmp_file.close()
+        tmp_path = Path(tmp_file.name)
+
+        if not _has_valid_audio_header(tmp_path, ext):
+            return {
+                "success": False,
+                "error": "Audio file content does not match allowed audio format header (invalid magic bytes).",
+            }
+
+        verify_video_upload_eligibility(video_id, allow_reupload=True)
+        object_path = upload_to_private_storage(video_id, tmp_path)
+        create_audio_mapping(video_id, object_path)
+
+        # Update transcripts table to mark status ready for transcription
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO transcripts (video_id, source, status, last_error, updated_at)
+                    VALUES (:vid, 'awaiting_authorized_audio', 'awaiting_transcription', 'Authorized audio uploaded; ready for Faster-Whisper', CURRENT_TIMESTAMP)
+                    ON CONFLICT (video_id) DO UPDATE SET
+                        source = 'awaiting_authorized_audio',
+                        status = 'awaiting_transcription',
+                        last_error = 'Authorized audio uploaded; ready for Faster-Whisper',
+                        updated_at = CURRENT_TIMESTAMP
+                """),
+                {"vid": video_id},
+            )
+
+        return {
+            "success": True,
+            "object_path": object_path,
+            "message": f"Successfully uploaded and verified authorized audio: {object_path}",
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+    finally:
+        try:
+            p = Path(tmp_file.name)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
 

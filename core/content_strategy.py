@@ -29,8 +29,8 @@ def generate_strategic_insights() -> None:
     topics = d["topics"][d["topics"]["scope"] == "ALL"]
     if not topics.empty:
         tx = d.get("transcripts", pd.DataFrame())
-        whisper_cnt = int((tx["source"] == "whisper").sum()) if not tx.empty else 0
-        captions_cnt = int((tx["source"] == "captions").sum()) if not tx.empty else 0
+        whisper_cnt = int(tx["source"].isin(["whisper", "faster_whisper"]).sum()) if not tx.empty else 0
+        captions_cnt = int(tx["source"].isin(["captions", "youtube_manual_caption", "youtube_auto_caption"]).sum()) if not tx.empty else 0
         if whisper_cnt > 0:
             src_label = "from Whisper transcripts + comments"
         elif captions_cnt > 0:

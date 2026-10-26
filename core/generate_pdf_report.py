@@ -225,7 +225,14 @@ def chart_relevance_by_channel(rel):
 
 def chart_transcript_sources(videos, transcripts):
     src = transcripts.set_index("video_id")["source"] if not transcripts.empty else pd.Series(dtype=str)
-    mapped = videos["video_id"].map(src).fillna("none").replace({"failed": "none"})
+    mapped = videos["video_id"].map(src).fillna("none").replace({
+        "failed": "none",
+        "audio_unavailable": "none",
+        "awaiting_authorized_audio": "none",
+        "faster_whisper": "whisper",
+        "youtube_manual_caption": "captions",
+        "youtube_auto_caption": "captions",
+    })
     names = {"whisper": "Whisper (audio)", "captions": "YouTube captions", "none": "Title only"}
     cols = {"whisper": "#805ad5", "captions": "#3182ce", "none": "#a0aec0"}
     counts = mapped.value_counts()
@@ -530,9 +537,9 @@ def generate_professional_pdf():
     # ------------------------------------------------------------------ Section 4: Whisper audio analysis
     story.append(PageBreak())
     story.append(Paragraph("4. Audio Analysis & Spoken Content: What the Competitors Say", heading_style))
-    whisper_cnt = int((transcripts["source"] == "whisper").sum()) if not transcripts.empty else 0
-    captions_cnt = int((transcripts["source"] == "captions").sum()) if not transcripts.empty else 0
-    unavail_cnt = int((transcripts["source"] == "audio_unavailable").sum()) if not transcripts.empty else 0
+    whisper_cnt = int(transcripts["source"].isin(["whisper", "faster_whisper"]).sum()) if not transcripts.empty else 0
+    captions_cnt = int(transcripts["source"].isin(["captions", "youtube_manual_caption", "youtube_auto_caption"]).sum()) if not transcripts.empty else 0
+    unavail_cnt = int(transcripts["source"].isin(["audio_unavailable", "awaiting_authorized_audio"]).sum()) if not transcripts.empty else 0
 
     if whisper_cnt > 0:
         desc_s4 = ("The first minutes of each video's audio are streamed straight into memory and analysed by OpenAI Whisper - no audio file is ever stored, only the text. "
@@ -559,7 +566,7 @@ def generate_professional_pdf():
             ("BOTTOMPADDING", (0, 0), (-1, -1), 6), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
         story.append(tw)
         story.append(Spacer(1, 8))
-        wt = transcripts[transcripts["source"] == "whisper"].merge(videos[["video_id", "channel_id"]], on="video_id") \
+        wt = transcripts[transcripts["source"].isin(["whisper", "faster_whisper"])].merge(videos[["video_id", "channel_id"]], on="video_id") \
                         .merge(channels[["channel_id", "channel_name"]], on="channel_id")
         wt = wt[wt["audio_seconds"].fillna(0) > 0]
         pace = (wt.groupby("channel_name")["word_count"].sum() / (wt.groupby("channel_name")["audio_seconds"].sum() / 60)) if not wt.empty else None
@@ -569,7 +576,8 @@ def generate_professional_pdf():
             cell("15. Speaking Pace by Channel", lambda: chart_pace_by_channel(pace),
                  "Words per minute in the analysed audio - how dense each creator's delivery is.", half_w)
             if pace is not None else [Paragraph("<i>No pace data yet.</i>", chart_note_style)]))
-        spoken = ins.spoken_topics(transcripts[transcripts["source"].isin(["whisper", "captions"])][["video_id", "transcript_text"]])
+        valid_tx_sources = ["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]
+        spoken = ins.spoken_topics(transcripts[transcripts["source"].isin(valid_tx_sources)][["video_id", "transcript_text"]])
         if not spoken.empty:
             story.append(KeepTogether(cell(
                 "16. Topics the Creators Talk About", lambda: chart_spoken_topics(spoken),
@@ -577,7 +585,8 @@ def generate_professional_pdf():
     else:
         story.append(Paragraph(f"<i>No audio has been analysed by Whisper yet in this run. ({captions_cnt} video(s) analyzed via YouTube captions, {unavail_cnt} unavailable/restricted).</i>", body_style))
         if captions_cnt > 0:
-            spoken = ins.spoken_topics(transcripts[transcripts["source"].isin(["whisper", "captions"])][["video_id", "transcript_text"]])
+            valid_tx_sources = ["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]
+            spoken = ins.spoken_topics(transcripts[transcripts["source"].isin(valid_tx_sources)][["video_id", "transcript_text"]])
             if not spoken.empty:
                 story.append(Spacer(1, 6))
                 story.append(KeepTogether(cell(

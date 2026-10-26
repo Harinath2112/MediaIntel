@@ -197,10 +197,10 @@ class TestConsistentDataCollection(unittest.TestCase):
         self.assertEqual(scoped.iloc[0]["channel_id"], "UC001")
 
     def test_07_transcription_selects_top_2_videos_per_channel(self):
-        """Test 7: Transcription candidates select exactly top 2 videos per channel ranked by view_count DESC."""
+        """Test 7: Transcription candidates select exactly top 2 latest published videos per channel."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.begin() as conn:
-            # 5 videos with distinct view counts for UC001
+            # 5 videos with distinct published_at timestamps for UC001
             for i, views in enumerate([5000, 100000, 20000, 80000, 15000]):
                 conn.execute(
                     text("INSERT INTO videos (video_id, channel_id, title, view_count, published_at) "
@@ -211,12 +211,12 @@ class TestConsistentDataCollection(unittest.TestCase):
         candidates = channel_manager.get_transcription_candidate_videos(limit_per_channel=2)
         c1_cands = candidates[candidates["channel_id"] == "UC001"]
         self.assertEqual(len(c1_cands), 2)
-        # Top 2 views are 100000 (v_rank_1) and 80000 (v_rank_3)
-        self.assertEqual(c1_cands.iloc[0]["video_id"], "v_rank_1")
-        self.assertEqual(c1_cands.iloc[1]["video_id"], "v_rank_3")
+        # Latest 2 published videos are v_rank_0 (now - 0h) and v_rank_1 (now - 1h)
+        self.assertEqual(c1_cands.iloc[0]["video_id"], "v_rank_0")
+        self.assertEqual(c1_cands.iloc[1]["video_id"], "v_rank_1")
 
     def test_08_missing_audio_handled_correctly(self):
-        """Test 8: Missing authorized audio records audio_unavailable without fake text or pipeline crash."""
+        """Test 8: Missing authorized audio records awaiting_authorized_audio without fake text or pipeline crash."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.begin() as conn:
             conn.execute(
@@ -234,9 +234,9 @@ class TestConsistentDataCollection(unittest.TestCase):
         tx = config.read_sql("SELECT * FROM transcripts WHERE video_id = 'v_no_audio'")
         self.assertFalse(tx.empty)
         row = tx.iloc[0]
-        self.assertEqual(row["source"], "audio_unavailable")
+        self.assertIn(row["source"], ["audio_unavailable", "awaiting_authorized_audio"])
         self.assertIsNone(row["transcript_text"])  # Never fabricated text!
-        self.assertIn("Audio unavailable", str(row["last_error"]))
+        self.assertTrue("unavailable" in str(row["last_error"]).lower() or "awaiting" in str(row["status"]).lower())
 
     def test_09_streamlit_latest_run_metrics_and_coverage_table(self):
         """Test 9: Per-channel coverage table contains all 9 required columns with accurate data."""

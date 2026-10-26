@@ -284,10 +284,10 @@ def get_channel_telemetry_df():
             COUNT(DISTINCT v.video_id) AS "Videos",
             COUNT(DISTINCT m.comment_id) AS "Comments",
             COUNT(DISTINCT s.comment_id) AS "Sentiments",
-            COUNT(DISTINCT CASE WHEN t.source = 'whisper' AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Whisper Transcripts",
-            COUNT(DISTINCT CASE WHEN t.source = 'captions' AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Captions",
-            COUNT(DISTINCT CASE WHEN t.source IN ('whisper', 'captions') AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Total Completed Transcripts",
-            COUNT(DISTINCT CASE WHEN t.source = 'audio_unavailable' THEN t.video_id END) AS "Audio Unavailable",
+            COUNT(DISTINCT CASE WHEN t.source IN ('whisper', 'faster_whisper') AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Whisper Transcripts",
+            COUNT(DISTINCT CASE WHEN t.source IN ('captions', 'youtube_manual_caption', 'youtube_auto_caption') AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Captions",
+            COUNT(DISTINCT CASE WHEN t.source IN ('whisper', 'faster_whisper', 'captions', 'youtube_manual_caption', 'youtube_auto_caption') AND t.transcript_text IS NOT NULL AND TRIM(t.transcript_text) != '' THEN t.video_id END) AS "Total Completed Transcripts",
+            COUNT(DISTINCT CASE WHEN t.source IN ('audio_unavailable', 'awaiting_authorized_audio', 'failed') THEN t.video_id END) AS "Audio Unavailable",
             MAX(v.published_at) AS "Latest Video"
         FROM channels c
         LEFT JOIN videos v ON v.channel_id = c.channel_id
@@ -337,18 +337,18 @@ def get_transcription_candidate_videos(
     limit_per_channel: int = 2,
     channel_ids: list[str] | None = None,
 ):
-    """Rank the 10 selected active videos per channel by view count and select top 2.
+    """Select the latest published videos per tracked channel for transcription.
     
-    Deterministic ranking: view_count DESC, published_at DESC, video_id ASC.
+    Deterministic ranking: published_at DESC, video_id ASC.
     """
     active_v = get_active_analysis_videos_df(10, channel_ids=channel_ids)
     if active_v.empty:
         return active_v
 
-    # Deterministic ranking within each channel: view_count DESC, published_at DESC, video_id ASC
+    # Deterministic ranking within each channel: published_at DESC, video_id ASC
     sorted_df = active_v.sort_values(
-        by=["channel_id", "view_count", "published_at", "video_id"],
-        ascending=[True, False, False, True]
+        by=["channel_id", "published_at", "video_id"],
+        ascending=[True, False, True]
     )
     return sorted_df.groupby("channel_id").head(limit_per_channel).reset_index(drop=True)
 
@@ -411,7 +411,7 @@ def update_all_channel_run_coverage(
         if not candidate_transcripts.empty and c_cand_set:
             completed_tx = len(candidate_transcripts[
                 candidate_transcripts["video_id"].isin(c_cand_set) &
-                candidate_transcripts["source"].isin(["whisper", "captions"]) &
+                candidate_transcripts["source"].isin(["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]) &
                 candidate_transcripts["transcript_text"].notna() &
                 (candidate_transcripts["transcript_text"].str.strip() != "")
             ])
@@ -632,6 +632,9 @@ def dispatch_cloud_pipeline(
     force: bool = False,
     run_ingestion: bool = True,
     run_ai: bool = True,
+    force_retranscribe: bool = False,
+    whisper_model: str = "tiny",
+    video_id: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch the GitHub Actions cloud pipeline with deduplication protection."""
     if not gh_token:
@@ -675,6 +678,9 @@ def dispatch_cloud_pipeline(
             "comments_per_video": str(comments_per_video),
             "transcripts_per_channel": str(transcripts_per_channel),
             "sentiment_limit": str(sentiment_limit),
+            "force_retranscribe": bool(force_retranscribe),
+            "whisper_model": str(whisper_model),
+            "video_id": str(video_id or "").strip(),
         },
     }
 
@@ -706,6 +712,38 @@ def dispatch_cloud_pipeline(
             "status_code": 500,
             "message": f"Failed to dispatch workflow: {type(exc).__name__}",
         }
+
+
+def dispatch_transcription_retry(
+    gh_token: str,
+    gh_repo: str = "Harinath2112/MediaIntel",
+    workflow_file: str = "mediaintel-cloud-pipeline.yml",
+    ref: str = "main",
+    video_id: str | None = None,
+    channel_ids: list[str] | str | None = None,
+    transcripts_per_channel: int = 2,
+    whisper_model: str = "tiny",
+    force_retranscribe: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Dispatch transcription-only workflow without re-running ingestion, AI sentiment, or RPA."""
+    return dispatch_cloud_pipeline(
+        gh_token=gh_token,
+        gh_repo=gh_repo,
+        workflow_file=workflow_file,
+        ref=ref,
+        channel_ids=channel_ids,
+        video_id=video_id,
+        transcripts_per_channel=transcripts_per_channel,
+        run_ingestion=False,
+        run_ai=False,
+        run_whisper=True,
+        run_rpa=False,
+        send_email=False,
+        force_retranscribe=force_retranscribe,
+        whisper_model=whisper_model,
+        force=force,
+    )
 
 
 def dispatch_rpa_reporting(
@@ -844,7 +882,7 @@ def preview_channel_deletion(
 
         if not tx_rows_df.empty:
             is_completed = (
-                tx_rows_df["source"].fillna("").astype(str).str.lower().isin(["whisper", "captions"]) &
+                tx_rows_df["source"].fillna("").astype(str).str.lower().isin(["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]) &
                 tx_rows_df["transcript_text"].notna() &
                 (tx_rows_df["transcript_text"].astype(str).str.strip() != "")
             )

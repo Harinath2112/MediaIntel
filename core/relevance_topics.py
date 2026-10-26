@@ -207,7 +207,8 @@ def video_text(row) -> tuple[str, str]:
     """(text, source) used to represent what a video says."""
     body = row.get("transcript_text")
     src = row.get("tsource")
-    if isinstance(body, str) and len(body.split()) >= MIN_TRANSCRIPT_WORDS and src in ("whisper", "captions"):
+    valid_sources = ("whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption")
+    if isinstance(body, str) and len(body.split()) >= MIN_TRANSCRIPT_WORDS and src in valid_sources:
         return body, src
     fallback = f"{row.get('title') or ''}. {row.get('description') or ''}"
     return fallback.strip(), "title_only"
