@@ -33,4 +33,4 @@ rich>=13.7
 # --- RPA (open source, no licence, no robot installer)
 robotframework>=7.0
 
-psycopg[binary]>=3.2,<4
+psycopg2-binary>=2.9.9

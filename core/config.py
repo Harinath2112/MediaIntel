@@ -172,8 +172,12 @@ def database_url(with_database: bool = True) -> str:
             try:
                 import psycopg  # noqa: F401
                 explicit = "postgresql+psycopg://" + explicit[13:]
-            except ImportError:
-                pass
+            except Exception:
+                try:
+                    import psycopg2  # noqa: F401
+                    explicit = "postgresql+psycopg2://" + explicit[13:]
+                except Exception:
+                    pass
 
         return explicit
     db_type = (env("DB_TYPE") or ("mysql" if any(os.getenv(k) for k in ("DB_HOST", "DB_USER", "DB_NAME")) else "sqlite")).lower()

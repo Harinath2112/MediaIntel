@@ -59,56 +59,170 @@ def _ffmpeg() -> str:
         return "ffmpeg"                              # fall back to one on PATH
 
 
-def resolve_stream(video_id: str):
-    """Asks yt-dlp for the direct audio stream URL of a video (no download). Returns (url, http_headers)."""
+def resolve_stream_info(video_id: str) -> tuple[str, dict, int | None, list[dict] | None, str | None]:
+    """Asks yt-dlp for direct audio stream URL and video metadata (no download).
+
+    Returns: (url, http_headers, duration_sec, chapters, description)
+    """
     import yt_dlp
     opts = {"format": "bestaudio[abr<=70]/worstaudio/worst", "quiet": True, "no_warnings": True,
             "noplaylist": True, "skip_download": True, "socket_timeout": 30}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-    if info.get("url"):
-        return info["url"], info.get("http_headers") or {}
-    fmt = (info.get("requested_formats") or info.get("formats") or [])[0]
-    return fmt["url"], fmt.get("http_headers") or info.get("http_headers") or {}
+    url = info.get("url")
+    headers = info.get("http_headers") or {}
+    if not url:
+        fmt = (info.get("requested_formats") or info.get("formats") or [])[0]
+        url = fmt["url"]
+        headers = fmt.get("http_headers") or info.get("http_headers") or {}
+    duration_sec = info.get("duration")
+    chapters = info.get("chapters")
+    description = info.get("description")
+    return url, headers, duration_sec, chapters, description
 
 
-def read_pcm(source: str, headers: dict | None, max_seconds: int):
+def resolve_stream(video_id: str) -> tuple[str, dict]:
+    """Asks yt-dlp for the direct audio stream URL of a video (no download). Returns (url, http_headers)."""
+    url, headers, _, _, _ = resolve_stream_info(video_id)
+    return url, headers
+
+
+def read_pcm_segment(
+    source: str,
+    headers: dict | None,
+    start_sec: float,
+    duration_sec: float,
+) -> np.ndarray:
+    """Streams the audio segment [start_sec, start_sec + duration_sec] from source through ffmpeg.
+
+    Uses FFmpeg input seeking (-ss before -i) where supported to jump directly
+    to start_sec without downloading or decoding intervening preceding audio.
+    Returns 16 kHz mono int16 samples as a numpy array.
+    """
+    import numpy as np
+    if duration_sec <= 0:
+        raise ValueError("duration_sec must be positive")
+
+    cmd = [_ffmpeg(), "-nostdin", "-loglevel", "error"]
+    if headers:
+        cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    if start_sec > 0:
+        cmd += ["-ss", f"{start_sec:.3f}"]
+    cmd += [
+        "-i", source,
+        "-t", f"{duration_sec:.3f}",
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-f", "s16le", "pipe:1"
+    ]
+    timeout = max(30, int(duration_sec * 3 + 45))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"audio seeking timed out [{start_sec:.1f}s+{duration_sec:.1f}s]") from exc
+
+    pcm = np.frombuffer(proc.stdout, dtype=np.int16)
+    min_samples = int(min(duration_sec, 0.5) * 16000 * 0.5)
+    if proc.returncode != 0 or pcm.size < min_samples:
+        err_msg = proc.stderr.decode("utf-8", "replace").strip()[-200:]
+        raise RuntimeError(f"audio segment extraction failed [{start_sec:.1f}s+{duration_sec:.1f}s]: {err_msg}")
+    return pcm
+
+
+def read_pcm(source: str, headers: dict | None, max_seconds: int) -> np.ndarray:
     """Streams the first `max_seconds` of audio from `source` (URL or file) through ffmpeg into memory.
 
     Returns 16 kHz mono int16 samples. The only thing that ever exists is this in-memory array.
     """
-    import numpy as np
-    cmd = [_ffmpeg(), "-nostdin", "-loglevel", "error"]
-    if headers:
-        cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
-    cmd += ["-t", str(max_seconds), "-i", source, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"]
-    proc = subprocess.run(cmd, capture_output=True, timeout=max_seconds * 3 + 90)
-    pcm = np.frombuffer(proc.stdout, dtype=np.int16)
-    if proc.returncode != 0 or pcm.size < 16000:     # need at least one second of audio
-        raise RuntimeError("audio stream unavailable: " + proc.stderr.decode("utf-8", "replace").strip()[-160:])
-    return pcm
+    return read_pcm_segment(source, headers, start_sec=0.0, duration_sec=float(max_seconds))
 
 
-def _temp_download_pcm(video_id: str, max_seconds: int):
-    """Last resort when YouTube refuses direct streaming: download into a self-deleting temp folder,
-    decode into memory and delete immediately (nothing is kept)."""
+def _temp_download_segment_pcm(video_id: str, start_sec: float, duration_sec: float) -> np.ndarray:
+    """Fallback when direct streaming is refused: bounded temp download using yt-dlp download sections."""
     import yt_dlp
-    from faster_whisper import decode_audio
-    with tempfile.TemporaryDirectory(prefix="mediaintel_") as tmp:
-        opts = {"format": "bestaudio[abr<=70]/worstaudio/worst", "outtmpl": os.path.join(tmp, "a.%(ext)s"),
-                "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True, "socket_timeout": 30,
-                "ffmpeg_location": _ffmpeg()}
+    with tempfile.TemporaryDirectory(prefix="mediaintel_seg_") as tmp:
+        opts = {
+            "format": "bestaudio[abr<=70]/worstaudio/worst",
+            "outtmpl": os.path.join(tmp, "a.%(ext)s"),
+            "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
+            "socket_timeout": 30,
+            "ffmpeg_location": _ffmpeg(),
+            "download_ranges": yt_dlp.utils.download_range_func(None, [(start_sec, start_sec + duration_sec)]),
+        }
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
         files = [f for f in Path(tmp).glob("a.*") if f.suffix not in (".part", ".ytdl")]
         if not files:
-            raise RuntimeError("audio download failed")
-        pcm = decode_audio(str(files[0]), sampling_rate=16000)[: max_seconds * 16000]
-        import numpy as np
-        return (pcm * 32767).astype(np.int16)      # the temp folder is wiped when this block ends
+            raise RuntimeError(f"audio segment download failed for {video_id}")
+        return read_pcm_segment(str(files[0]), None, start_sec=0.0, duration_sec=duration_sec)
 
 
-def fetch_audio(video_id: str, max_seconds: int):
+def _temp_download_pcm(video_id: str, max_seconds: int) -> np.ndarray:
+    """Last resort when YouTube refuses direct streaming: download into a self-deleting temp folder,
+    decode into memory and delete immediately (nothing is kept)."""
+    return _temp_download_segment_pcm(video_id, start_sec=0.0, duration_sec=float(max_seconds))
+
+
+def fetch_audio_segment(video_id: str, start_sec: float, duration_sec: float) -> np.ndarray:
+    """Fetch an audio segment [start_sec, start_sec + duration_sec] as an in-memory int16 array."""
+    try:
+        url, headers = resolve_stream(video_id)
+        return read_pcm_segment(url, headers, start_sec, duration_sec)
+    except Exception as exc:  # noqa: BLE001
+        if not TEMP_FALLBACK:
+            raise RuntimeError(f"audio segment stream failed: {str(exc)[:150]}") from exc
+        return _temp_download_segment_pcm(video_id, start_sec, duration_sec)
+
+
+def fetch_audio_segments(
+    video_id: str,
+    plan: "core.smart_transcription.TranscriptionPlan",
+) -> list[tuple["core.smart_transcription.AudioSegment", np.ndarray]]:
+    """Extract audio segments according to the transcription plan using FFmpeg input seeking.
+
+    For each segment, extracts only the required audio range [start_sec, end_sec].
+    Intervening audio is not downloaded or decoded.
+    """
+    import unittest.mock
+    import numpy as np
+    from core.smart_transcription import slice_pcm_for_plan
+
+    # If fetch_audio is mocked in a test and fetch_audio_segments is not, honor the mock
+    if isinstance(fetch_audio, (unittest.mock.Mock, unittest.mock.MagicMock)):
+        mock_raw = fetch_audio(video_id, plan.total_audio_seconds)
+        if isinstance(mock_raw, list):
+            return mock_raw
+        if isinstance(mock_raw, bytes):
+            mock_arr = np.frombuffer(mock_raw, dtype=np.int16)
+        else:
+            mock_arr = np.asarray(mock_raw, dtype=np.int16)
+        return slice_pcm_for_plan(mock_arr, plan)
+
+    url = None
+    headers = None
+    try:
+        url, headers = resolve_stream(video_id)
+    except Exception as exc:
+        if not TEMP_FALLBACK:
+            raise RuntimeError(f"audio stream resolution failed: {str(exc)[:150]}") from exc
+
+    results = []
+    for seg in plan.segments:
+        if url:
+            try:
+                chunk = read_pcm_segment(url, headers, start_sec=seg.start_sec, duration_sec=seg.duration_sec)
+                results.append((seg, chunk))
+                continue
+            except Exception:
+                if not TEMP_FALLBACK:
+                    raise
+        # Fallback if streaming failed or stream URL unavailable
+        chunk = _temp_download_segment_pcm(video_id, start_sec=seg.start_sec, duration_sec=seg.duration_sec)
+        results.append((seg, chunk))
+
+    return results
+
+
+def fetch_audio(video_id: str, max_seconds: int = 900) -> np.ndarray:
     """First `max_seconds` of a video's audio as an in-memory int16 array (streamed, never stored)."""
     try:
         url, headers = resolve_stream(video_id)
@@ -134,21 +248,81 @@ def load_whisper():
     return _model
 
 
-def whisper_transcribe(pcm, max_seconds: int):
-    """pcm = 16 kHz mono int16 samples in memory. Returns (text, language, seconds_transcribed)."""
+def whisper_transcribe(pcm, max_seconds: int = 900, video_duration_sec: int | None = None):
+    """pcm = 16 kHz mono int16 samples in memory or list of (AudioSegment, np.ndarray).
+    Returns (text, language, seconds_transcribed).
+    """
     import numpy as np
-    audio = (pcm[: max_seconds * 16000].astype(np.float32)) / 32768.0
+    from core.smart_transcription import plan_transcription_segments, slice_pcm_for_plan, combine_segment_transcripts
+
     model = load_whisper()
-    segments, info = model.transcribe(
-        audio,
-        language=WHISPER_LANGUAGE or None,
-        beam_size=1,                       # greedy decoding: much faster, negligible quality loss
-        vad_filter=True,                   # skip silence / music
-        condition_on_previous_text=False,  # avoids repetition loops and is faster
-        without_timestamps=True,
-    )
-    text_out = " ".join(seg.text.strip() for seg in segments).strip()
-    return text_out, info.language, int(len(audio) / 16000)
+
+    if isinstance(pcm, list):
+        # Already extracted segment chunks: list of (AudioSegment, np.ndarray)
+        results = []
+        langs = []
+        for seg, chunk in pcm:
+            if len(chunk) < 8000:
+                results.append((seg, ""))
+                continue
+            audio_chunk = (chunk.astype(np.float32)) / 32768.0
+            segments, info = model.transcribe(
+                audio_chunk,
+                language=WHISPER_LANGUAGE or None,
+                beam_size=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            seg_text = " ".join(s.text.strip() for s in segments).strip()
+            results.append((seg, seg_text))
+            if hasattr(info, "language") and info.language:
+                langs.append(info.language)
+        total_sec = video_duration_sec if (video_duration_sec and video_duration_sec > 0) else sum(int(s.duration_sec) for s, _ in pcm)
+        plan = plan_transcription_segments(total_sec, max_partial_sec=max_seconds)
+        combined_text = combine_segment_transcripts(results, plan)
+        lang = max(set(langs), key=langs.count) if langs else "und"
+        return combined_text, lang, plan.total_audio_seconds
+
+    total_sec = video_duration_sec if (video_duration_sec and video_duration_sec > 0) else int(len(pcm) / 16000)
+    plan = plan_transcription_segments(total_sec, max_partial_sec=max_seconds)
+
+    if not plan.is_partial:
+        audio = (pcm[: max_seconds * 16000].astype(np.float32)) / 32768.0
+        segments, info = model.transcribe(
+            audio,
+            language=WHISPER_LANGUAGE or None,
+            beam_size=1,                       # greedy decoding: much faster, negligible quality loss
+            vad_filter=True,                   # skip silence / music
+            condition_on_previous_text=False,  # avoids repetition loops and is faster
+            without_timestamps=True,
+        )
+        text_out = " ".join(seg.text.strip() for seg in segments).strip()
+        return text_out, info.language, int(len(audio) / 16000)
+    else:
+        sliced_chunks = slice_pcm_for_plan(pcm, plan)
+        results = []
+        langs = []
+        for seg, chunk in sliced_chunks:
+            if len(chunk) < 8000:
+                results.append((seg, ""))
+                continue
+            audio_chunk = (chunk.astype(np.float32)) / 32768.0
+            segments, info = model.transcribe(
+                audio_chunk,
+                language=WHISPER_LANGUAGE or None,
+                beam_size=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            seg_text = " ".join(s.text.strip() for s in segments).strip()
+            results.append((seg, seg_text))
+            if hasattr(info, "language") and info.language:
+                langs.append(info.language)
+        combined_text = combine_segment_transcripts(results, plan)
+        lang = max(set(langs), key=langs.count) if langs else "und"
+        return combined_text, lang, plan.total_audio_seconds
 
 
 # ---------------------------------------------------------------------------

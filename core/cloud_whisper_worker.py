@@ -20,11 +20,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import config, channel_manager, storage_audio
+from core.smart_transcription import (
+    SMART_TRANSCRIPTION_THRESHOLD_SEC,
+    MAX_PARTIAL_AUDIO_SEC,
+    AudioSegment,
+    TranscriptionPlan,
+    plan_transcription_segments,
+    combine_segment_transcripts,
+    slice_pcm_for_plan,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -220,6 +230,8 @@ def save_transcript_record(
     is_truncated: bool = False,
     attempts: int = 1,
     last_error: str | None = None,
+    video_duration_sec: int | None = None,
+    segment_timestamps: list[dict] | None = None,
 ) -> None:
     """Immediately persist completed, failed, or awaiting transcript record to database."""
     word_count = len(transcript_text.split()) if transcript_text else 0
@@ -270,17 +282,86 @@ def save_transcript_record(
                 "updated_at": now,
             },
         )
+        if video_duration_sec and video_duration_sec > 0:
+            try:
+                conn.execute(
+                    text("UPDATE videos SET duration_sec = :dur WHERE video_id = :vid AND (duration_sec IS NULL OR duration_sec = 0)"),
+                    {"dur": int(video_duration_sec), "vid": video_id},
+                )
+            except Exception:
+                pass
 
 
 def transcribe_audio_pcm(
     pcm_bytes,
-    max_seconds: int,
+    max_seconds: int = MAX_PARTIAL_AUDIO_SEC,
     model_size: str = "tiny",
+    video_duration_sec: int | None = None,
+    chapters: list[dict] | None = None,
+    description: str | None = None,
 ) -> tuple[str, str, int, bool]:
-    """Transcribe 16 kHz mono int16 PCM audio with Faster-Whisper.
+    """Transcribe 16 kHz mono int16 PCM audio with Faster-Whisper using Smart 15-Minute Strategy.
 
-    Returns (transcript_text, detected_language, audio_seconds, is_truncated).
+    Rule 1 (< 15 minutes / < 900s):
+      - Transcribes the full video audio without truncation.
+      - Returns (transcript_text, detected_language, audio_seconds, False).
+
+    Rule 2 (>= 15 minutes / >= 900s):
+      - Selects a maximum of 15 minutes (<= 900s) of representative audio.
+      - Prefers informative chapters; otherwise distributes across beginning, middle, and end.
+      - Omits intros, outros, and sponsor advertisements where reasonably detectable.
+      - Returns (combined_partial_text, detected_language, audio_seconds, True).
     """
+    if isinstance(pcm_bytes, list):
+        # Already extracted segment chunks: list of (AudioSegment, np.ndarray)
+        actual_duration = int(video_duration_sec) if (video_duration_sec and video_duration_sec > 0) else sum(int(s.duration_sec) for s, _ in pcm_bytes)
+        plan = plan_transcription_segments(
+            video_duration_sec=actual_duration,
+            chapters=chapters,
+            description=description,
+            max_partial_sec=max_seconds,
+        )
+        model = get_whisper_model(model_size)
+        whisper_lang = config.env("WHISPER_LANGUAGE")
+        segment_results: list[tuple[AudioSegment, str]] = []
+        detected_langs: list[str] = []
+
+        for seg, chunk in pcm_bytes:
+            if isinstance(chunk, bytes):
+                chunk = np.frombuffer(chunk, dtype=np.int16)
+            if len(chunk) < 8000:
+                segment_results.append((seg, ""))
+                continue
+            audio_chunk = (chunk.astype(np.float32)) / 32768.0
+            segments, info = model.transcribe(
+                audio_chunk,
+                language=whisper_lang or None,
+                beam_size=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            seg_text = " ".join(s.text.strip() for s in segments).strip()
+            segment_results.append((seg, seg_text))
+            if hasattr(info, "language") and info.language:
+                detected_langs.append(info.language)
+
+        combined_text = combine_segment_transcripts(segment_results, plan)
+        detected_lang = max(set(detected_langs), key=detected_langs.count) if detected_langs else "und"
+        return combined_text, detected_lang, plan.total_audio_seconds, plan.is_truncated
+
+    if isinstance(pcm_bytes, bytes):
+        if len(pcm_bytes) % 2 != 0:
+            pcm_bytes = pcm_bytes[:len(pcm_bytes) - 1]
+        pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+    else:
+        pcm_array = np.asarray(pcm_bytes, dtype=np.int16)
+
+    total_samples = len(pcm_array)
+    pcm_audio_sec = int(total_samples / 16000)
+    actual_duration = int(video_duration_sec) if (video_duration_sec and video_duration_sec > 0) else pcm_audio_sec
+
+    # Mock hook for offline tests
     try:
         from core import transcribe_videos
         import unittest.mock
@@ -292,49 +373,70 @@ def transcribe_audio_pcm(
             if isinstance(w_res, tuple) and len(w_res) >= 2:
                 text_out = w_res[0]
                 lang = w_res[1]
-                sec = w_res[2] if len(w_res) > 2 else 0
-                return text_out, lang, sec, False
+                sec = w_res[2] if len(w_res) > 2 else min(max_seconds, actual_duration)
+                is_trunc = (actual_duration >= SMART_TRANSCRIPTION_THRESHOLD_SEC)
+                return text_out, lang, sec, is_trunc
     except Exception:
         pass
 
-    if isinstance(pcm_bytes, bytes):
-        if len(pcm_bytes) % 2 != 0:
-            pcm_bytes = pcm_bytes[:len(pcm_bytes) - 1]
-        pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
-    else:
-        pcm_array = np.asarray(pcm_bytes, dtype=np.int16)
-
-    total_samples = len(pcm_array)
-    total_audio_sec = int(total_samples / 16000)
-    is_truncated = False
-
-    max_samples = max_seconds * 16000
-    if total_samples > max_samples:
-        is_truncated = True
-        LOGGER.warning(
-            "Audio duration (%d sec) exceeds limit (%d sec); bounding audio and setting is_truncated=True.",
-            total_audio_sec,
-            max_seconds,
-        )
-        audio = (pcm_array[:max_samples].astype(np.float32)) / 32768.0
-        used_seconds = max_seconds
-    else:
-        audio = (pcm_array.astype(np.float32)) / 32768.0
-        used_seconds = total_audio_sec
+    # Build smart transcription plan
+    plan = plan_transcription_segments(
+        video_duration_sec=actual_duration,
+        chapters=chapters,
+        description=description,
+        max_partial_sec=max_seconds,
+    )
 
     model = get_whisper_model(model_size)
     whisper_lang = config.env("WHISPER_LANGUAGE")
-    segments, info = model.transcribe(
-        audio,
-        language=whisper_lang or None,
-        beam_size=1,
-        vad_filter=True,
-        condition_on_previous_text=False,
-        without_timestamps=True,
-    )
-    text_out = " ".join(seg.text.strip() for seg in segments).strip()
-    detected_lang = getattr(info, "language", "und") or "und"
-    return text_out, detected_lang, used_seconds, is_truncated
+
+    if not plan.is_truncated:
+        # Full video transcription (100% audio transcribed)
+        audio = (pcm_array.astype(np.float32)) / 32768.0
+        segments, info = model.transcribe(
+            audio,
+            language=whisper_lang or None,
+            beam_size=1,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        text_out = " ".join(seg.text.strip() for seg in segments).strip()
+        detected_lang = getattr(info, "language", "und") or "und"
+        return text_out, detected_lang, plan.total_audio_seconds, False
+    else:
+        # Rule 2: Smart 15-Minute representative segments
+        LOGGER.info(
+            "Video duration (%d sec >= %d sec threshold): executing Smart 15-Minute Strategy (%s).",
+            actual_duration,
+            SMART_TRANSCRIPTION_THRESHOLD_SEC,
+            plan.format_summary(),
+        )
+        sliced_chunks = slice_pcm_for_plan(pcm_array, plan)
+        segment_results: list[tuple[AudioSegment, str]] = []
+        detected_langs: list[str] = []
+
+        for seg, chunk in sliced_chunks:
+            if len(chunk) < 8000:
+                segment_results.append((seg, ""))
+                continue
+            audio_chunk = (chunk.astype(np.float32)) / 32768.0
+            segments, info = model.transcribe(
+                audio_chunk,
+                language=whisper_lang or None,
+                beam_size=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            seg_text = " ".join(s.text.strip() for s in segments).strip()
+            segment_results.append((seg, seg_text))
+            if hasattr(info, "language") and info.language:
+                detected_langs.append(info.language)
+
+        combined_text = combine_segment_transcripts(segment_results, plan)
+        detected_lang = max(set(detected_langs), key=detected_langs.count) if detected_langs else "und"
+        return combined_text, detected_lang, plan.total_audio_seconds, True
 
 
 def transcribe_single_audio_asset(

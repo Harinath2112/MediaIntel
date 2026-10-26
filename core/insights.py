@@ -62,8 +62,9 @@ def build_recommendations(d: dict[str, pd.DataFrame]) -> list[tuple[str, str]]:
                          f"No competitor transcript covers it, yet {int(gaps.mentions)} comments mention it."))
 
     tr = d["transcripts"]
-    if not tr.empty and (tr["source"] == "whisper").any():
-        spoken = spoken_topics(tr[tr["source"].isin(["whisper", "captions"])][["video_id", "transcript_text"]], top_k=3)
+    valid_sources = ["whisper", "faster_whisper", "captions", "youtube_manual_caption", "youtube_auto_caption"]
+    if not tr.empty and tr["source"].isin(["whisper", "faster_whisper"]).any():
+        spoken = spoken_topics(tr[tr["source"].isin(valid_sources)][["video_id", "transcript_text"]], top_k=3)
         if not spoken.empty:
             said = ", ".join(spoken["topic"].head(3))
             tail = ""
