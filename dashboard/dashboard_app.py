@@ -303,12 +303,8 @@ with st.sidebar:
         st.image(str(LOGO), width=170)
     st.markdown('<div class="sidebar-heading">🎯 Data Scope & Filters</div>', unsafe_allow_html=True)
 
-    data_scope = st.radio(
-        "Analysis Scope",
-        ["🎯 Active Analysis Set (10 Recent / Channel)", "🏛️ All-Time Warehouse Records"],
-        index=0,
-        help="Active Analysis Set filters to the deterministic 10 most recent videos per channel for this run. All-Time Warehouse shows historical accumulation."
-    )
+    # Standard dashboard scope: Active Analysis Set (10 most recent videos per channel)
+    data_scope = "🎯 Active Analysis Set (10 Recent / Channel)"
 
     selected_channel = st.selectbox(
         "Competitor channel",
@@ -520,30 +516,6 @@ with tab_sentiment:
             st.plotly_chart(style_fig(fig), width="stretch")
             st.caption("+100 = every comment about that aspect is positive, −100 = every one is negative. "
                        "One comment can contribute to several aspects.")
-
-    with st.container(border=True):
-        section_title("🔎", "Aspect Evidence Explorer — the exact words behind each aspect sentiment")
-        if aspects_df.empty or "evidence" not in aspects_df:
-            empty_state("No aspect evidence stored yet.")
-        else:
-            ev = aspects_df.merge(comments, on="comment_id", how="left").merge(
-                videos[["video_id", "title", "channel_id"]], on="video_id", how="left").merge(
-                channels[["channel_id", "channel_name"]], on="channel_id", how="left")
-            ev = ev[ev["video_id"].isin(filtered_videos["video_id"])]
-            e1, e2 = st.columns(2)
-            with e1:
-                asp_pick = st.selectbox("Aspect", sorted(ev["aspect"].dropna().unique().tolist()), key="ev_aspect")
-            with e2:
-                sen_pick = st.selectbox("Sentiment", ["Negative", "Neutral", "Positive"], index=0, key="ev_sent")
-            sel = ev[(ev["aspect"] == asp_pick) & (ev["sentiment_label"] == sen_pick)].sort_values("confidence", ascending=False).head(15)
-            if sel.empty:
-                empty_state("No clauses for this combination.")
-            else:
-                st.dataframe(sel[["channel_name", "title", "evidence", "polarity", "confidence"]], width="stretch",
-                             hide_index=True, column_config={
-                    "channel_name": "Channel", "title": "Video", "evidence": "Clause (evidence)",
-                    "polarity": st.column_config.NumberColumn("Polarity", format="%+.2f"),
-                    "confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=1, format="%.2f")})
 
 # ===================== VIDEO PERFORMANCE =====================
 with tab_performance:
@@ -1360,7 +1332,7 @@ with tab_system:
                     pass
             branch_ref = branch_ref or "main"
 
-            p_c1, p_c2, p_c3 = st.columns([2, 1, 1])
+            p_c1, p_c2 = st.columns([3, 1])
             with p_c1:
                 tracked_df = all_channels_df[all_channels_df["is_tracked"] == True] if not all_channels_df.empty else pd.DataFrame()
                 target_mode = st.radio(
@@ -1380,16 +1352,9 @@ with tab_system:
                     target_cids_list = tracked_df[tracked_df["channel_name"].isin(sel_chans)]["channel_id"].tolist()
             with p_c2:
                 v_limit = st.number_input("Max Videos / Channel", min_value=1, max_value=50, value=10, step=1, key="v_limit_in")
-            with p_c3:
-                s_limit = st.number_input(
-                    "Max RoBERTa Comments (0 for All)",
-                    min_value=0,
-                    max_value=8000,
-                    value=0,
-                    step=500,
-                    key="s_limit_in",
-                    help="0 analyzes all pending comments incrementally across all channels without truncation."
-                )
+
+            # Max RoBERTa Comments is internally set to 0 (process all eligible comments incrementally)
+            s_limit = 0
 
             cb_rpa_col1, cb_rpa_col2 = st.columns([1, 1])
             with cb_rpa_col1:
