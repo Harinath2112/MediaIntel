@@ -20,7 +20,7 @@ on:
         description: 'Run Storage-only Whisper worker for pending audio assets'
         required: true
         type: boolean
-        default: true
+        default: false
       run_rpa:
         description: 'Run RPA report generation and artifact publishing'
         required: true

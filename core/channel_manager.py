@@ -626,7 +626,7 @@ def dispatch_cloud_pipeline(
     comments_per_video: int = 100,
     transcripts_per_channel: int = 2,
     sentiment_limit: int = 0,
-    run_whisper: bool = True,
+    run_whisper: bool = False,
     run_rpa: bool = True,
     send_email: bool = False,
     force: bool = False,

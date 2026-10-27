@@ -112,6 +112,7 @@ UCBwmMxybNva6P_5VmxjzwqA"""
         call_kwargs = mock_post.call_args[1]
         payload = call_kwargs["json"]
         self.assertEqual(payload["inputs"]["run_rpa"], True)
+        self.assertEqual(payload["inputs"]["run_whisper"], False)
         self.assertEqual(payload["inputs"]["send_email"], False)
         self.assertEqual(payload["inputs"]["run_ingestion"], True)
         self.assertEqual(payload["inputs"]["run_ai"], True)

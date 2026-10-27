@@ -1378,7 +1378,7 @@ with tab_system:
                             comments_per_video=100,
                             transcripts_per_channel=2,
                             sentiment_limit=s_limit,
-                            run_whisper=True,
+                            run_whisper=False,
                             run_rpa=run_rpa_opt,
                             send_email=send_email_opt,
                             force=False,
